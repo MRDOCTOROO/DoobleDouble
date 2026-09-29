@@ -275,6 +275,11 @@ fun SpaceDetailScreen(
                                             accent = accent,
                                             modifier = Modifier.weight(1f),
                                             onClick = { vm.launchApp(app.packageName) },
+                                            // 长按钉到桌面，pinApp 内部会 toast。
+                                            // 之所以只在桌面视图（这里是 chunked 后的网格）
+                                            // 接而不是 AppRow：长按 AppRow 有别的语义
+                                            // （弹菜单/卸载），加长按钉桌面会和它冲突。
+                                            onLongClick = { vm.pinApp(app) },
                                         )
                                     }
                                     // 补齐末行的空位：否则最后一行会被拉伸成宽格子，
@@ -285,6 +290,15 @@ fun SpaceDetailScreen(
                                 }
                             }
                         }
+
+                        // 长按功能的可发现性提示。放在桌面网格下方、一行字，
+                        // 不喧宾夺主但让用户知道这能力存在。
+                        Text(
+                            text = "提示：长按图标可发送到桌面。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = InkSoft,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
                     }
                 }
             }
@@ -856,11 +870,18 @@ private fun DesktopTile(
     accent: Color,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
 ) {
     val icon = rememberVirtualAppIcon(app.packageName, app.apkPath, app.versionCode)
 
     Column(
-        modifier = modifier.brutalClickable { onClick() },
+        modifier = modifier.brutalClickable(
+            onClick = onClick,
+            // 长按 = 直接把这个应用钉到桌面。
+            // 比"打开快捷方式面板再选'钉到桌面'"少两步，并且符合用户在桌面上
+            // 长按图标 = 弹快捷操作的肌肉记忆。
+            onLongClick = onLongClick,
+        ),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         AppIconBadge(

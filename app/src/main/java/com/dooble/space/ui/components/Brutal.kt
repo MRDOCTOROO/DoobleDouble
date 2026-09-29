@@ -5,6 +5,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -45,16 +46,27 @@ import com.dooble.space.ui.theme.PaperDeep
 /**
  * 无涟漪的点击修饰符。
  * 后现代/粗野主义刻意不要 Material 的水波纹——那太"圆滑"了。
+ *
+ * 长按支持通过 [onLongClick] 传入（用于"长按图标发送到桌面"这类场景）。
+ * 不需要长按的调用点不用改 —— 默认值是 null，行为与之前完全一致。
+ *
+ * 参数顺序刻意把 onClick 放最后 —— 让现有调用点 `brutalClickable { ... }` 的
+ * trailing lambda 继续绑到 onClick 上，不用批量改。
+ *
+ * combinedClickable 是实验 API，但稳定已久且短期内不会动。
  */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 fun Modifier.brutalClickable(
     enabled: Boolean = true,
+    onLongClick: (() -> Unit)? = null,
     onClick: () -> Unit,
 ): Modifier = composed {
-    clickable(
+    combinedClickable(
         interactionSource = remember { MutableInteractionSource() },
         indication = null,
         enabled = enabled,
         onClick = onClick,
+        onLongClick = onLongClick,
     )
 }
 
