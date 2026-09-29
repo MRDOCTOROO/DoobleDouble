@@ -62,11 +62,43 @@ object NetworkProbe {
         val domesticCode: Int,
         val googleCode: Int,
         val checkinCode: Int,
+        /** Google 探测端点解析到的 IP。DNS 被污染时这里会是一个完全不相干的地址 */
+        val resolvedIp: String?,
+        /** 解析结果看起来不像 Google 的 IP（启发式，不是铁证） */
+        val dnsLooksPoisoned: Boolean,
         val detail: String,
     ) {
         /** 能否直接用于 microG 登录 */
         val loginReady: Boolean get() = verdict == Verdict.OK
     }
+
+    /**
+     * Google 常见的 IPv4 段（**启发式**，不是权威名单）。
+     *
+     * 用途只有一个：在 DNS 被污染时给用户一个能自己看懂的信号。
+     * 实测踩到的例子：`www.google.com` 被解析到 `69.171.235.22`
+     * —— 那是 Facebook 的段，与 Google 毫无关系。
+     *
+     * 刻意不做成"白名单"：Google 的地址段一直在变，写死了迟早误判。
+     * 所以只在**明显不像**的时候提示，措辞也说清是"可能"。
+     */
+    private val GOOGLE_IP_PREFIXES = listOf(
+        "142.250.", "172.217.", "216.58.", "74.125.", "108.177.",
+        "64.233.", "173.194.", "209.85.", "66.102.", "216.239.",
+        "142.251.", "172.253.", "74.6.", "8.8.",
+    )
+
+    /**
+     * 这个 IP 看起来是不是 Google 的。
+     *
+     * 纯函数，可单测。抽出来是因为它是"DNS 污染"这个结论的唯一依据，
+     * 判错了会把用户引向错误的排查方向。
+     *
+     * 注意**不是白名单**：返回 false 只说明"不像"，不说明"一定被污染"。
+     * 调用方的措辞也必须保持这个分寸。
+     */
+    fun looksLikeGoogleIp(ip: String): Boolean =
+        GOOGLE_IP_PREFIXES.any { ip.startsWith(it) }
 
     suspend fun run(timeoutMs: Int = 6000): Result = withContext(Dispatchers.IO) {
         // 三个探测**并发**跑。串行的话最坏要 3×timeout（18s），
@@ -74,47 +106,76 @@ object NetworkProbe {
         val domesticDeferred = async { probe(DOMESTIC, timeoutMs) }
         val googleDeferred = async { probe(GOOGLE, timeoutMs) }
         val checkinDeferred = async { probe(CHECKIN, timeoutMs) }
+        val ipDeferred = async { resolveIp("www.gstatic.com") }
 
         val domestic = domesticDeferred.await()
         val google = googleDeferred.await()
         val checkin = checkinDeferred.await()
+        val ip = ipDeferred.await()
 
         val verdict = when {
             google.code in 200..399 -> Verdict.OK
             domestic.code in 200..399 -> Verdict.GOOGLE_BLOCKED
             else -> Verdict.NO_NETWORK
         }
+        val poisoned = ip != null && !looksLikeGoogleIp(ip)
 
         Result(
             verdict = verdict,
             domesticCode = domestic.code,
             googleCode = google.code,
             checkinCode = checkin.code,
-            detail = buildDetail(verdict, domestic, google, checkin),
+            resolvedIp = ip,
+            dnsLooksPoisoned = poisoned,
+            detail = buildDetail(verdict, domestic, google, ip, poisoned),
         )
     }
+
+    /**
+     * 解析一个域名，返回 IP 字符串。
+     *
+     * 单独做这一步是因为**"连不上"和"解析到假地址"要分开报**：
+     * 前者用户要去查代理，后者要去查 DNS。混在一起说，用户不知道该动哪。
+     */
+    private fun resolveIp(host: String): String? =
+        runCatching { java.net.InetAddress.getByName(host).hostAddress }.getOrNull()
 
     private fun buildDetail(
         verdict: Verdict,
         domestic: Probe,
         google: Probe,
-        checkin: Probe,
-    ): String = when (verdict) {
-        Verdict.OK ->
-            "国内外站点都可达，microG 的 checkin 端点也通。可以正常登录 Google 账号。"
+        resolvedIp: String?,
+        poisoned: Boolean,
+    ): String {
+        val dnsLine = when {
+            resolvedIp == null -> "www.gstatic.com 解析失败（DNS 完全不可用）。"
+            poisoned ->
+                "⚠️ DNS 可疑：www.gstatic.com 被解析到 **$resolvedIp**，" +
+                    "这不是 Google 常见的地址段 —— 典型的 **DNS 污染**。"
+            else -> "DNS 解析正常（www.gstatic.com → $resolvedIp）。"
+        }
 
-        Verdict.GOOGLE_BLOCKED ->
-            "国内站点可达（$DOMESTIC → ${domestic.code}），但 Google 不可达" +
-                "（$GOOGLE → ${google.code}${google.error?.let { "，$it" } ?: ""}）。" +
-                "说明**代理/加速没有生效**，或者被中间设备阻断了。" +
-                "常见原因：① 代理订阅过期或节点全挂；② 代理规则把 Google 走了直连；" +
-                "③ DNS 被污染（把 www.google.com 解析到别的公司的 IP）。" +
-                "microG 登录必须能连上 $CHECKIN，请先修好网络再试。"
+        return when (verdict) {
+            Verdict.OK ->
+                "国内外站点都可达。$dnsLine 可以正常登录 Google 账号。"
 
-        Verdict.NO_NETWORK ->
-            "连国内站点都不可达（$DOMESTIC → ${domestic.code}" +
-                "${domestic.error?.let { "，$it" } ?: ""}）。" +
-                "设备当前没有可用网络，或者被系统限制了联网权限。"
+            Verdict.GOOGLE_BLOCKED ->
+                "国内站点可达（$DOMESTIC → ${domestic.code}），但 Google 不可达" +
+                    "（$GOOGLE → ${google.code}${google.error?.let { "，$it" } ?: ""}）。\n" +
+                    dnsLine + "\n" +
+                    "说明**代理/加速没有生效**。排查顺序：" +
+                    "① 代理软件里换一个节点，或看节点延迟是不是全红；" +
+                    "② 确认代理不是「直连 / 规则模式漏了 Google」；" +
+                    "③ 如果是分应用代理，把本应用加进代理名单；" +
+                    "④ 用系统浏览器打开 google.com 验证 —— 如果浏览器也不行，" +
+                    "问题在代理本身，与本应用无关。\n" +
+                    "microG 登录必须能连上 $CHECKIN，请先修好网络再试。"
+
+            Verdict.NO_NETWORK ->
+                "连国内站点都不可达（$DOMESTIC → ${domestic.code}" +
+                    "${domestic.error?.let { "，$it" } ?: ""}）。" +
+                    "设备当前没有可用网络，或者被系统限制了联网权限。"
+        }
     }
 
     private data class Probe(val code: Int, val error: String?)
