@@ -1,0 +1,182 @@
+name: Android
+
+# ---------------------------------------------------------------------------
+# 为什么这个 workflow 存在
+#
+# 本工程只有 arm64-v8a / armeabi-v7a 两个 ABI（Bcore 的 libblackbox.so 上游只出
+# 这两个）。本地出包要装 JDK 17 + Android SDK 35 + NDK 26.1.10909125 + CMake 3.22.1，
+# 换台机器就得重来一遍。放到 CI 上之后：
+#   - 每次 push 自动产出可安装的 APK，手机浏览器直接下；
+#   - 打 tag 自动发 Release，产物长期可访问（artifact 只有 90 天）；
+#   - 顺便跑单元测试，避免「本地绿、推上去红」。
+#
+# ⚠️ 一个必须知道的前提：**Bcore 的 AAR 是入库的**（engine/libs/bcore.aar）。
+# 重建它需要上游源码 + JDK 21 + NDK 29 + 5 个补丁，在 CI 里复现不划算。
+# 所以改了 tools/bcore-patch/ 之后，**必须本地跑一次 tools/build-bcore.sh
+# 并把新的 bcore.aar 一起提交**，否则 CI 用的还是旧引擎。
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      build_full:
+        description: '同时构建 full 变体（内置 microG，约 112MB，较慢）'
+        type: boolean
+        default: false
+
+# 打 tag 时要创建 Release，需要 contents: write
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NDK_VERSION: '26.1.10909125'
+  CMAKE_VERSION: '3.22.1'
+  GRADLE_OPTS: '-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 显式装齐本工程需要的三样：platform 35 / build-tools 35 / NDK / CMake。
+      # 不装的话 AGP 会在构建中途报 "NDK not configured" 或自动去下，
+      # 后者更糟 —— 它可能下成别的版本，然后报一堆看不懂的 native 错误。
+      - name: Install SDK components
+        run: |
+          sdkmanager --install \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;${NDK_VERSION}" \
+            "cmake;${CMAKE_VERSION}" > /dev/null
+          echo "已安装："
+          ls "$ANDROID_SDK_ROOT/ndk"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml', 'gradle/wrapper/gradle-wrapper.properties', '**/*.gradle.kts') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Decode signing keystore
+        # 没配 Secret 也能跑：release 变体会产出**未签名** APK（构建不失败）。
+        # 但那样出来的包装不上，所以正式用请务必配上这四个 Secret。
+        if: ${{ env.KEYSTORE_BASE64 != '' }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/keystore"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/keystore/dooble-release.jks"
+          echo "DOOBLE_KEYSTORE_PATH=$RUNNER_TEMP/keystore/dooble-release.jks" >> "$GITHUB_ENV"
+          echo "密钥库已就绪（$(stat -c%s "$RUNNER_TEMP/keystore/dooble-release.jks") 字节）"
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Unit tests
+        run: ./gradlew :gms:test :engine:test :app:testLiteDebugUnitTest --no-daemon --stacktrace
+
+      # clean 是**必须**的，不是洁癖：
+      # 增量构建出来的 APK 会比 clean 后大 4MB 左右（zipalign 对齐填充 + 残留
+      # 本地头）。GitHub runner 每次都是干净的，但显式写出来是为了让本地复现
+      # CI 时也不会量到虚胖的体积。
+      - name: Build lite release APK
+        env:
+          DOOBLE_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          DOOBLE_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          DOOBLE_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          ./gradlew clean --no-daemon
+          ./gradlew :app:assembleLiteRelease --no-daemon --stacktrace
+
+      - name: Build full release APK
+        # full 变体会在构建时下载 ~108MB 的 microG；只在打 tag 或手动勾选时做
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.build_full }}
+        env:
+          DOOBLE_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          DOOBLE_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          DOOBLE_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew :app:assembleFullRelease --no-daemon --stacktrace
+
+      - name: Verify APK signature & ABIs
+        run: |
+          set -e
+          for apk in $(find app/build/outputs/apk -name '*.apk' | sort); do
+            echo "=== $apk ($(du -h "$apk" | cut -f1)) ==="
+            # 签名：debug 签名会被 apksigner 判为 v1/v2 存在但证书是 android debug。
+            # 这里只做「能不能验过」的粗检，证书细节留给用户自己看。
+            if "$ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner" verify --print-certs "$apk" > /tmp/certs.txt 2>&1; then
+              grep -m1 "Signer #1 certificate DN" /tmp/certs.txt || true
+            else
+              echo "⚠️ 未签名或验签失败（本地无密钥时是预期行为）"
+            fi
+            # ABI：必须**只有** arm64-v8a / armeabi-v7a。
+            # 出现 x86/x86_64 会导致 primaryCpuAbi 变成 x86_64，
+            # libblackbox.so 永远找不到 —— 表现为「引擎静默降级」。
+            echo "ABI:"
+            unzip -l "$apk" | grep -oE 'lib/[^/]+/' | sort -u || true
+          done
+
+      - name: Upload lite APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dooble-lite-release
+          path: app/build/outputs/apk/lite/release/*.apk
+          if-no-files-found: error
+
+      - name: Upload full APK
+        if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.build_full }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dooble-full-release
+          path: app/build/outputs/apk/full/release/*.apk
+          if-no-files-found: warn
+
+      - name: Publish release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/outputs/apk/*/release/*.apk
+          generate_release_notes: true
+          draft: false
+          body: |
+            ## 安装说明
+
+            | 变体 | 说明 |
+            |---|---|
+            | `lite` | 宿主约 13MB。**microG 在首次「装配谷歌环境」时按需下载**（约 107MB），需要联网。推荐 |
+            | `full` | 内置 microG，约 112MB，离线可用。只在打 tag 时构建 |
+
+            两者都包含 `arm64-v8a` + `armeabi-v7a` 两个 ABI，覆盖绝大多数真机。
+
+            **不支持 x86/x86_64**（模拟器需要带 ARM 翻译层，如 MuMu）。
+            这是 Bcore 的上游限制：它的 `libblackbox.so` 只出了这两个 ABI。
+
+            安装：手机浏览器打开本页 → 下载对应 APK → 允许「安装未知应用」。
+
+            升级：直接覆盖安装即可（同一个签名密钥）。**不要卸载重装** ——
+            那会清掉所有空间、空间内的应用和已登录的谷歌账号。

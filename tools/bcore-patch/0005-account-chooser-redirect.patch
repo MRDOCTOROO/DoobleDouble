@@ -1,0 +1,167 @@
+From: Dooble Double <noreply@example.invalid>
+Subject: [PATCH 0005] 把宿主系统账号选择器改道到空间内 microG 的登录界面
+
+空间内的应用调 AccountManager.newChooseAccountIntent() 时拿到的是显式指向
+宿主系统包 android 的 ChooseTypeAndAccountActivity。
+
+**容器解析不了它** —— 宿主系统包的活动不在容器的组件表里，所以
+resolveActivity 返回 null，代码走到 resolveInfo == null 的兜底分支，
+把原始 intent 丢给真实系统。那个活动于是在宿主进程（android:ui, uid 1000）
+里跑起来，而宿主的 AccountManager 里没有 com.google 的 authenticator
+（microG 装在空间里），于是立刻 'pretending the request was canceled'
+并关闭 —— 用户看到「点了没反应」。
+
+本补丁在那个兜底分支里加一个改道：目标是宿主系统包的账号选择器时，
+改指向空间内 microG 的 LoginActivity。空间里没有 microG 时保持原样。
+
+两个坑（都踩过）：
+  1) 改道点必须在 null 兜底分支里，放通用路径上永远不执行；
+  2) 目标不能用 AccountPickerActivity —— 它自己会转调系统账号选择器，
+     于是被改道回它自己，200ms 内无限递归。用 LoginActivity，
+     并加 EXTRA_REDIRECTED 环路保护。
+
+生成方式（保持补丁小而干净）：
+  diff -u <pre-0005 副本> <改好的文件>
+注意：**不要用 Edit 工具直接改 nbb-src 里的文件** —— 它会把行尾写成 LF，
+而仓库里是 CRLF，于是 diff 认为整个文件都变了，补丁会膨胀成整文件重写。
+
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/ActivityManagerCommonProxy.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/ActivityManagerCommonProxy.java
+@@ -2,6 +2,7 @@
+ 
+ import android.content.ComponentName;
+ import android.content.Intent;
++import android.content.pm.ActivityInfo;
+ import android.content.pm.PackageInfo;
+ import android.content.pm.ResolveInfo;
+ import android.net.Uri;
+@@ -96,6 +97,14 @@
+                     resolveInfo = resolveStoreIntent(intent);
+                 }
+                 if (resolveInfo == null) {
++                    // ---- Dooble: 系统账号选择器改道（tools/bcore-patch/0005） ----
++                    // 必须在**这里**改道，不能放在下面通用路径上：容器根本解析不了
++                    // android.accounts.ChooseTypeAndAccountActivity（宿主系统包的
++                    // 活动没进容器的组件表），所以它走的就是这条 null 兜底分支。
++                    // 放在通用路径上会永远不执行 —— 这个坑踩过一次。
++                    resolveInfo = resolveAccountChooser(intent);
++                }
++                if (resolveInfo == null) {
+                     intent.setPackage(origPackage);
+                     return method.invoke(who, args);
+                 }
+@@ -190,6 +199,114 @@
+             return null;
+         }
+ 
++        /** 宿主系统里"账号选择器"的类名特征（AOSP / 厂商 ROM 的 android.accounts 包） */
++        private static final String[] ACCOUNT_CHOOSER_SUFFIXES = {
++                "accounts.ChooseTypeAndAccountActivity",
++                "accounts.ChooseAccountTypeActivity",
++                "accounts.ChooseAccountActivity",
++        };
++
++        /**
++         * 改道目标的标记 extra。
++         *
++         * 用途：改道后的 intent 带上它；下次再进这个钩子时看到标记就直接放行。
++         * 防的是**递归** —— 曾经把目标设成 microG 的
++         * {@code org.microg.tools.AccountPickerActivity}，结果那个 Activity 在
++         * onCreate 里自己也调 {@code AccountManager.newChooseAccountIntent()}，
++         * 于是被改道回它自己，200ms 内无限循环刷屏。
++         */
++        private static final String EXTRA_REDIRECTED = "_dooble_account_redirect_";
++
++        /**
++         * 空间内 microG 提供的账号入口。
++         *
++         * **只放 LoginActivity，不要放 AccountPickerActivity。**
++         * 后者是个"包装层"，它的实现就是转调系统的
++         * {@code ChooseTypeAndAccountActivity} —— 而系统那个正是我们要绕开的，
++         * 于是形成递归。LoginActivity 是真正干活的登录界面（WebView 加载
++         * accounts.google.com），它不会再回头去调账号选择器。
++         */
++        private static final String[] MICROG_ACCOUNT_ENTRY = {
++                "com.google.android.gms", "org.microg.gms.auth.login.LoginActivity",
++        };
++
++        /**
++         * 把宿主系统账号选择器的 intent 改道到空间内 microG 的登录界面。
++         *
++         * ## 为什么按 intent 的 component 判断，而不是按解析结果判断
++         *
++         * 因为**容器根本解析不了它**：宿主系统包（{@code android}）的活动不在容器的
++         * 组件表里，所以 {@code resolveActivity} 返回 null，代码会走到
++         * {@code resolveInfo == null} 的兜底分支，把**原始 intent** 丢给真实系统。
++         * 那个活动于是在宿主进程（{@code android:ui}, uid 1000）里跑起来 ——
++         * 而宿主的 AccountManager 里没有任何 {@code com.google} 的 authenticator
++         * （microG 装在空间里），于是它立刻打印
++         *   "unable to find account type, pretending the request was canceled"
++         * 然后关掉。用户看到的就是「点了没反应」。
++         *
++         * ## 已知限制（不要以为改了这里 Aurora 就能登录）
++         *
++         * 改道让"添加账号"这条路可达了，但 **Aurora Store 自己的 Google 登录仍然
++         * 完成不了**：它读的是 {@code onActivityResult} 里的
++         * {@code KEY_ACCOUNT_NAME}，而 LoginActivity 不会回填那个结果，
++         * Aurora 仍然收到 RESULT_CANCELED。要真正打通，需要往空间里装一个
++         * 我们自己实现的"账号选择器"APK 来满足那个返回契约 —— 属于后续工作。
++         *
++         * @return 改道后的 ResolveInfo；不需要/无法改道时返回 null（保持原样）
++         */
++        private ResolveInfo resolveAccountChooser(Intent intent) {
++            if (intent == null) {
++                return null;
++            }
++            // 环路保护：这条 intent 是我们自己改道出来的，直接放行
++            if (intent.hasExtra(EXTRA_REDIRECTED)) {
++                return null;
++            }
++            ComponentName comp = intent.getComponent();
++            Slog.i(TAG, "account-chooser probe: component=" + comp);
++            if (comp == null) {
++                return null;
++            }
++            // 只认宿主系统包（package = "android"）。别的包一律不动 ——
++            // 猜错会把正常应用自己的账号页面也劫持掉。
++            if (!"android".equals(comp.getPackageName())) {
++                return null;
++            }
++            String name = comp.getClassName() == null ? "" : comp.getClassName();
++            boolean isChooser = false;
++            for (String suffix : ACCOUNT_CHOOSER_SUFFIXES) {
++                if (name.endsWith(suffix)) {
++                    isChooser = true;
++                    break;
++                }
++            }
++            if (!isChooser) {
++                Slog.i(TAG, "account-chooser: name not recognized (" + name + ")");
++                return null;
++            }
++
++            int userId = BActivityThread.getUserId();
++            ComponentName cn = new ComponentName(MICROG_ACCOUNT_ENTRY[0], MICROG_ACCOUNT_ENTRY[1]);
++            try {
++                ActivityInfo target = BlackBoxCore.getBPackageManager()
++                        .getActivityInfo(cn, GET_META_DATA, userId);
++                if (target == null) {
++                    // 空间里没有 microG：保持原样。宁可让用户看到系统那个空页面，
++                    // 也不要凭空造一个不存在的组件名。
++                    Slog.w(TAG, "No in-container account entry for " + name + "; leaving as-is");
++                    return null;
++                }
++                intent.putExtra(EXTRA_REDIRECTED, true);
++                Slog.i(TAG, "Redirect account chooser " + name + " -> " + cn);
++                ResolveInfo out = new ResolveInfo();
++                out.activityInfo = target;
++                return out;
++            } catch (Throwable t) {
++                Slog.w(TAG, "Probe account entry failed: " + cn + " / " + t.getMessage());
++                return null;
++            }
++        }
++
+         /**
+          * 是不是一条"要去商店"的链接。
+          *

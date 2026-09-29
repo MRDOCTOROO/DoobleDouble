@@ -1,0 +1,121 @@
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/core/system/pm/PackageManagerCompat.java b/Bcore/src/main/java/top/niunaijun/blackbox/core/system/pm/PackageManagerCompat.java
+index ab9983b..53801af 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/core/system/pm/PackageManagerCompat.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/core/system/pm/PackageManagerCompat.java
+@@ -13,6 +13,7 @@ import android.content.pm.PackageParser;
+ import android.content.pm.PermissionInfo;
+ import android.content.pm.ProviderInfo;
+ import android.content.pm.ServiceInfo;
++import android.content.pm.Signature;
+ import android.content.res.AssetManager;
+ import android.content.res.Resources;
+ import android.os.Build;
+@@ -194,8 +195,12 @@ public class PackageManagerCompat {
+             base = BlackBoxCore.getContext().getPackageManager().getPackageInfo(p.packageName, flags);
+         } catch (PackageManager.NameNotFoundException ignored) {
+         }
++        // 宿主注入的签名伪造钩子。宿主不注入时恒为 null，此处行为与上游完全一致。
++        Signature[] spoofed = PackageSignatureSpoofer.spoof(p.packageName, userId);
+         if ((flags & PackageManager.GET_SIGNATURES) != 0) {
+-            if (base == null) {
++            if (spoofed != null) {
++                pi.signatures = spoofed;
++            } else if (base == null) {
+                 pi.signatures = p.mSignatures;
+             } else {
+                 pi.signatures = base.signatures;
+@@ -203,7 +208,11 @@ public class PackageManagerCompat {
+         }
+         if (BuildCompat.isPie()) {
+             if ((flags & PackageManager.GET_SIGNING_CERTIFICATES) != 0) {
+-                if (base == null) {
++                if (spoofed != null) {
++                    PackageParser.SigningDetails signingDetails = PackageParser.SigningDetails.UNKNOWN;
++                    BRPackageParserSigningDetails.get(signingDetails)._set_signatures(spoofed);
++                    pi.signingInfo = BRSigningInfo.get()._new(signingDetails);
++                } else if (base == null) {
+                     PackageParser.SigningDetails signingDetails = PackageParser.SigningDetails.UNKNOWN;
+                     BRPackageParserSigningDetails.get(signingDetails)._set_signatures(p.mSigningDetails.signatures);
+                     pi.signingInfo = BRSigningInfo.get()._new(signingDetails);
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/core/system/pm/PackageSignatureSpoofer.java b/Bcore/src/main/java/top/niunaijun/blackbox/core/system/pm/PackageSignatureSpoofer.java
+new file mode 100644
+index 0000000..fc367c7
+--- /dev/null
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/core/system/pm/PackageSignatureSpoofer.java
+@@ -0,0 +1,76 @@
++package top.niunaijun.blackbox.core.system.pm;
++
++import android.content.pm.Signature;
++
++/**
++ * 容器级签名伪造的接入点（由宿主应用注入）。
++ *
++ * ## 为什么引擎只留口子、不写死策略
++ *
++ * 「把 com.google.android.gms 的签名伪造成 Google 官方签名」这件事，策略本身
++ * （伪造成什么、要不要启用、用哪张证书）是**宿主应用的业务决策**，而且涉及
++ * 合规敏感内容。把它固化进虚拟化引擎有两个问题：
++ *
++ *  1. 引擎就变成了一款"专门用于绕过签名校验"的工具，而它本来的职责只是
++ *     让未安装的 APK 跑起来；
++ *  2. 策略要能随时改（换证书、按空间开关），写死在引擎里就得重新编译。
++ *
++ * 所以这里只暴露一个静态注入点。宿主不注入时 {@link #spoof} 恒返回 null，
++ * 容器行为与打补丁前**完全一致**——这保证了补丁本身是零风险的。
++ *
++ * ## 调用位置
++ *
++ * {@link PackageManagerCompat#generatePackageInfo} 是容器内 PackageInfo
++ * 的生成出口，也是 `signatures` / `signingInfo` 的唯一填充处。两条分支
++ * （旧版 GET_SIGNATURES 与 Android 9+ 的 GET_SIGNING_CERTIFICATES）都会先问
++ * 这里要一次伪造结果。
++ */
++public final class PackageSignatureSpoofer {
++
++    /**
++     * 宿主实现的钩子。
++     *
++     * 注意：本方法会在**容器服务进程的 Binder 线程池**里被调用，可能并发。
++     * 实现必须是线程安全的，且要快——每次查询 PackageInfo 都会走到这里。
++     */
++    public interface Hook {
++        /**
++         * @param packageName 被查询的包名
++         * @param userId      容器内的用户 id（即宿主侧的一个「空间」）
++         * @return 伪造后的签名；返回 null 表示不伪造，容器走原有逻辑
++         */
++        Signature[] spoof(String packageName, int userId);
++    }
++
++    private static volatile Hook sHook;
++
++    private PackageSignatureSpoofer() {
++    }
++
++    /** 由宿主在进程初始化时调用。传 null 可关闭伪造 */
++    public static void setHook(Hook hook) {
++        sHook = hook;
++    }
++
++    public static Hook getHook() {
++        return sHook;
++    }
++
++    /**
++     * 询问宿主是否需要伪造。
++     *
++     * 这里吞掉所有异常：宿主钩子出问题不应该把容器的包管理搞崩——
++     * 最坏的结果是签名没伪造成功，而不是虚拟应用起不来。
++     */
++    public static Signature[] spoof(String packageName, int userId) {
++        Hook hook = sHook;
++        if (hook == null || packageName == null || userId <= 0) {
++            return null;
++        }
++        try {
++            return hook.spoof(packageName, userId);
++        } catch (Throwable ignored) {
++            return null;
++        }
++    }
++}
