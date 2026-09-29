@@ -81,22 +81,33 @@ class BcorePatchContractTest {
 
     @Test
     fun `改道点必须在 null 兜底分支里`() {
-        val added = addedText()
-        // 判据：改道调用必须出现在 `resolveStoreIntent(intent);` 之后、
-        // `intent.setPackage(origPackage);` 之前 —— 也就是那个兜底分支内部。
-        val store = added.indexOf("resolveInfo = resolveStoreIntent(intent);")
-        val redirect = added.indexOf("resolveInfo = resolveAccountChooser(intent);")
-        val fallback = added.indexOf("intent.setPackage(origPackage);")
-        assertTrue("新增行里应出现 resolveStoreIntent 调用", store >= 0)
-        assertTrue("新增行里应出现改道调用", redirect >= 0)
-        assertTrue("新增行里应出现兜底 setPackage", fallback >= 0)
+        // 判据：改道调用必须夹在 `resolveStoreIntent(intent);` 与
+        // `intent.setPackage(origPackage);` 之间 —— 也就是那个兜底分支内部。
+        //
+        // ⚠️ 这里**不能**只看新增行（`+`）：补丁精简之后，
+        // `resolveStoreIntent` 和 `setPackage(origPackage)` 都变成了**上下文行**，
+        // 只有改道本身是新增的。第一版就是只查新增行，于是 store == -1 直接失败。
+        //
+        // 也不能用「第一次出现的位置」比较：`diff` 可能把同一段代码先以 `-`（旧）
+        // 再以 `+`（新）各列一遍，`indexOf` 会命中旧的那份，得到相反结论。
+        // 所以改成「以改道为锚点，找它**前面最近**和**后面最近**的那两行」——
+        // 这个判据对补丁的具体形态不敏感。
+        val text = patchText()
+        val redirect = text.indexOf("resolveInfo = resolveAccountChooser(intent);")
+        assertTrue("补丁里应出现改道调用", redirect >= 0)
+
+        val store = text.lastIndexOf("resolveInfo = resolveStoreIntent(intent);", redirect)
         assertTrue(
-            "改道必须在 resolveStoreIntent 之后（顺序即优先级）",
-            store < redirect,
+            "改道必须写在 resolveStoreIntent 之后（顺序即优先级）—— " +
+                "写在它前面说明改道点跑到了兜底分支外面",
+            store in 0 until redirect,
         )
+
+        val fallback = text.indexOf("intent.setPackage(origPackage);", redirect)
         assertTrue(
-            "改道必须在 setPackage(origPackage) 之前 —— 否则它永远不会执行",
-            redirect < fallback,
+            "改道必须写在 setPackage(origPackage) 之前 —— 否则它永远不会执行" +
+                "（容器解析不到那个 intent，代码在兜底分支就 return 了）",
+            fallback > redirect,
         )
     }
 
