@@ -76,6 +76,17 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
     private val _report = MutableStateFlow<SelfCheckReport?>(null)
     val report: StateFlow<SelfCheckReport?> = _report.asStateFlow()
 
+    /**
+     * 自检是否正在跑。
+     *
+     * 必须暴露出来：自检里有一项要**真的发网络请求**（见 `NetworkProbe`），
+     * 在代理不通的环境下最坏要 6 秒，加上本地检查整体可能几十秒。
+     * 没有这个状态的话，用户点完按钮看到的是"什么都没发生" ——
+     * 实测有人因此以为按钮坏了，反复点。
+     */
+    private val _selfCheckRunning = MutableStateFlow(false)
+    val selfCheckRunning: StateFlow<Boolean> = _selfCheckRunning.asStateFlow()
+
     private val _accounts = MutableStateFlow<List<GoogleAccountInfo>>(emptyList())
     val accounts: StateFlow<List<GoogleAccountInfo>> = _accounts.asStateFlow()
 
@@ -765,19 +776,27 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * 对**指定空间**跑自检。
      *
-     * 与 [runSelfCheck] 的区别：那个读 `_currentSpaceId`，在"创建空间后立刻装配"
-     * 这条路径上时序不保证（`_currentSpaceId` 刚被赋值，但 UI 可能还没切过去）。
-     * 显式传 spaceId 更稳。
+     * 必须显式传 spaceId，不要读 `_currentSpaceId`：
+     * 自检页自己就带着 spaceId，而 `_currentSpaceId` 是"当前选中的空间"这个
+     * **另一套状态**。两者不一致时（比如从通知/深链直接进自检页），
+     * 读隐式状态会去查另一个空间，甚至因为它是 null 而**静默什么都不做** ——
+     * 用户点了按钮毫无反应，也看不到任何提示。这个坑真实发生过。
      */
-    private fun runSelfCheckFor(spaceId: String, silent: Boolean = false) {
+    fun runSelfCheckFor(spaceId: String, silent: Boolean = false) {
+        if (_selfCheckRunning.value) return
+        _selfCheckRunning.value = true
         viewModelScope.launch {
-            runCatching {
-                val r = withContext(Dispatchers.IO) { DoobleContainer.selfCheck.run(spaceId) }
-                _report.value = r
-                if (!silent && r.overall == com.dooble.gms.CheckStatus.PASS) {
-                    _toast.value = "自检全部通过"
-                }
-            }.onFailure { _toast.value = "自检失败：${it.message}" }
+            try {
+                runCatching {
+                    val r = withContext(Dispatchers.IO) { DoobleContainer.selfCheck.run(spaceId) }
+                    _report.value = r
+                    if (!silent && r.overall == com.dooble.gms.CheckStatus.PASS) {
+                        _toast.value = "自检全部通过"
+                    }
+                }.onFailure { _toast.value = "自检失败：${it.message}" }
+            } finally {
+                _selfCheckRunning.value = false
+            }
         }
     }
 

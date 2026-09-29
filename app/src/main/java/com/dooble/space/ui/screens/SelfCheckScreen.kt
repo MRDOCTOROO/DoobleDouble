@@ -50,6 +50,7 @@ fun SelfCheckScreen(
     onBack: () -> Unit,
 ) {
     val report by vm.report.collectAsState()
+    val running by vm.selfCheckRunning.collectAsState()
 
     Column(
         Modifier
@@ -66,7 +67,24 @@ fun SelfCheckScreen(
 
         Column(Modifier.padding(16.dp)) {
             val r = report
-            if (r == null) {
+            if (running) {
+                // 运行中必须**明确显示**。自检里有一项要真的发网络请求
+                // （在代理不通的环境下最坏 6 秒），整体可能几十秒。
+                // 之前没有这个状态，用户点完看到的是"什么都没发生"，
+                // 会以为按钮坏了反复点。
+                BrutalSurface(Modifier.fillMaxWidth(), background = Acid, contentPadding = 20.dp) {
+                    Column {
+                        Text("正在自检…", style = MaterialTheme.typography.titleLarge, color = Ink)
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "其中「网络」一项会真的发请求去探 Google 端点，" +
+                                "代理不通时最长要等 6 秒。请稍候。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = InkSoft,
+                        )
+                    }
+                }
+            } else if (r == null) {
                 BrutalSurface(Modifier.fillMaxWidth(), background = PaperDeep, contentPadding = 20.dp) {
                     Column {
                         Text("尚未运行自检", style = MaterialTheme.typography.titleLarge, color = Ink)
@@ -126,11 +144,16 @@ fun SelfCheckScreen(
 
             Spacer(Modifier.height(6.dp))
             BrutalButton(
-                text = "重新自检",
-                onClick = { vm.runSelfCheck() },
-                background = Ink,
+                text = if (running) "正在自检…" else "重新自检",
+                // 传 **spaceId**，不是 vm.runSelfCheck() ——
+                // 后者读的是 `_currentSpaceId` 那套隐式状态，两者不一致时
+                // 会去查另一个空间，甚至在它为 null 时**静默什么都不做**。
+                // 页面自己明明有 spaceId，没有理由不用。
+                onClick = { vm.runSelfCheckFor(spaceId) },
+                background = if (running) InkFaint else Ink,
                 contentColor = Acid,
                 modifier = Modifier.fillMaxWidth(),
+                enabled = !running,
             )
 
             Spacer(Modifier.height(40.dp))

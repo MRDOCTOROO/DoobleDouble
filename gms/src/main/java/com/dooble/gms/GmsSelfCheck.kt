@@ -80,11 +80,12 @@ class GmsSelfCheck(
         // 还是容器坏了 —— 实测中真的有人因此一路怀疑到容器实现上。
         val net = NetworkProbe.run()
         items += CheckItem(
-            "网络", "能否连上 Google",
+            "网络", "能否登录 Google（含 microG 的 checkin 端点）",
             when (net.verdict) {
                 NetworkProbe.Verdict.OK -> CheckStatus.PASS
-                // 两种情况都算 FAIL：用户要的是"能不能登录"，不是"哪一层坏了"。
+                // 三种失败都算 FAIL：用户要的是"能不能登录"，不是"哪一层坏了"。
                 // 区别写在 detail 里。
+                NetworkProbe.Verdict.CHECKIN_BLOCKED,
                 NetworkProbe.Verdict.GOOGLE_BLOCKED,
                 NetworkProbe.Verdict.NO_NETWORK,
                 -> CheckStatus.FAIL

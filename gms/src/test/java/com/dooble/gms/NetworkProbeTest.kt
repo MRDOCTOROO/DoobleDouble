@@ -1,5 +1,6 @@
 package com.dooble.gms
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -82,5 +83,76 @@ class NetworkProbeTest {
     @Test
     fun `空串不崩`() {
         assertFalse(NetworkProbe.looksLikeGoogleIp(""))
+    }
+
+    // ------------------------------------------------------------------ 判定逻辑
+    //
+    // 这一组守的是一个**真实发生过的 bug**：原来只按"Google 通用端点通不通"
+    // 判定，于是"gstatic 通、checkin 不通"被判成 OK —— 而那种情况下 microG
+    // 登录一定失败。用户看到自检全绿却登录不了，比不报还糟。
+
+    @Test
+    fun `三项全通才判 OK`() {
+        assertEquals(
+            NetworkProbe.Verdict.OK,
+            NetworkProbe.decideVerdict(domesticCode = 200, googleCode = 204, checkinCode = 405),
+        )
+    }
+
+    @Test
+    fun `Google 通但 checkin 不通 判 CHECKIN_BLOCKED`() {
+        // 这是真机现场：www.gstatic.com 返回 204，android.clients.google.com 连不上。
+        // 表现就是"浏览器能开 google.com，microG 卡在请稍候"。
+        assertEquals(
+            NetworkProbe.Verdict.CHECKIN_BLOCKED,
+            NetworkProbe.decideVerdict(domesticCode = 200, googleCode = 204, checkinCode = 0),
+        )
+    }
+
+    @Test
+    fun `checkin 的判据是连上了就行 不看状态码`() {
+        // 对 /checkin 发 GET 本来就会返回 4xx。只要不是 0（连不上），
+        // 就说明网络能到那台服务器。
+        listOf(400, 403, 404, 405, 500).forEach { code ->
+            assertEquals(
+                "checkin 返回 $code 应视为'能连上'",
+                NetworkProbe.Verdict.OK,
+                NetworkProbe.decideVerdict(200, 204, code),
+            )
+        }
+    }
+
+    @Test
+    fun `Google 不通但国内通 判 GOOGLE_BLOCKED`() {
+        assertEquals(
+            NetworkProbe.Verdict.GOOGLE_BLOCKED,
+            NetworkProbe.decideVerdict(domesticCode = 200, googleCode = 0, checkinCode = 0),
+        )
+    }
+
+    @Test
+    fun `国内也不通 判 NO_NETWORK 且优先于其它判断`() {
+        assertEquals(
+            NetworkProbe.Verdict.NO_NETWORK,
+            NetworkProbe.decideVerdict(domesticCode = 0, googleCode = 0, checkinCode = 0),
+        )
+        // 即使 Google 那一项"看起来通"，只要国内不通也应当判 NO_NETWORK ——
+        // 那说明探测本身不可信（比如被 captive portal 劫持返回了 200）。
+        assertEquals(
+            NetworkProbe.Verdict.NO_NETWORK,
+            NetworkProbe.decideVerdict(domesticCode = 0, googleCode = 204, checkinCode = 405),
+        )
+    }
+
+    @Test
+    fun `loginReady 只在 OK 时为真`() {
+        // CHECKIN_BLOCKED 必须为 false —— 这正是那个 bug 的守门测试。
+        assertTrue(NetworkProbe.Result(NetworkProbe.Verdict.OK, 200, 204, 405, null, false, "").loginReady)
+        assertFalse(
+            NetworkProbe.Result(NetworkProbe.Verdict.CHECKIN_BLOCKED, 200, 204, 0, null, false, "").loginReady,
+        )
+        assertFalse(
+            NetworkProbe.Result(NetworkProbe.Verdict.GOOGLE_BLOCKED, 200, 0, 0, null, false, "").loginReady,
+        )
     }
 }
