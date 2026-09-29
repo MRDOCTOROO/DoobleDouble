@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Bcore 的 AAR 里 LauncherTheme 继承 Theme.AppCompat.Light.NoActionBar，
+        而我们的工程不依赖 AppCompat，资源链接会失败。
+
+        我们的 ClientConfiguration 已设 isEnableLauncherActivity = false，
+        这个 Activity 永远不会被启动，因此只需要让资源能解析即可。
+        继承平台主题即可，不必为了一个死掉的样式引入整个 AppCompat（约 1.5MB）。
+
+        资源合并规则：应用模块的同名资源优先于库模块，所以这里能覆盖它。
+    -->
+    <style name="LauncherTheme" parent="@android:style/Theme.Material.Light.NoActionBar" />
+
+    <style name="Theme.Dooble" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/paper</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+
+    <!--
+        快捷方式跳板专用：全透明、无动画、无标题栏。
+
+        它存在的唯一意义是"等引擎就绪 -> 拉起虚拟应用 -> 自己结束"，
+        任何可见的界面元素都会让用户看到一次多余的闪屏。
+        windowIsTranslucent + windowNoTitle + windowDisablePreview 三者缺一不可：
+        windowDisablePreview 关掉系统在冷启动时画的"预览窗口"（那块白底），
+        否则冷启动路径上仍会闪一下。
+    -->
+    <style name="Theme.Dooble.Trampoline" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
+</resources>

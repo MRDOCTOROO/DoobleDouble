@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  保活服务的通知图标。
+  通知小图标走的是 alpha 蒙版，系统只取形状不取颜色，所以这里用纯色填充、
+  不做任何描边细节——太细的线条在小尺寸下会糊成一团。
+  形状语义：两个错位叠加的方块 = 同一个应用的两份实例。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M2,2h12v12h-12z" />
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M10,10h12v12h-12z" />
+</vector>

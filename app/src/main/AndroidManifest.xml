@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 下载 microG 组件、容器内应用联网 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- 读取用户选择的 APK -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_MEDIA_APPS" />
+
+    <!-- 安装未知来源应用（把 APK 装进空间） -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!-- 前台服务：维持空间内的虚拟进程存活 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Android 14 起，specialUse 类型的前台服务必须单独申请这条权限 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- 读取宿主机上已安装的应用，用于"从已装应用快速导入" -->
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
+    <!--
+        包可见性兜底。
+
+        QUERY_ALL_PACKAGES 是 normal 权限、安装即授予，本该让 getInstalledPackages()
+        看到全部包。但 MIUI / ColorOS / OriginOS / EMUI 把它改成了用户开关
+        （设置里叫"读取应用列表"），关着的时候那个 API 只剩本应用自己。
+
+        下面这段 <queries> 走的是另一条路：intent 解析。声明之后
+        queryIntentActivities(MAIN/LAUNCHER) 就能看到全部有桌面图标的包，
+        不受那个开关影响。于是：
+          - HostAppScanner 可以用两者数量差**确定地**判断是否被拦；
+          - 真被拦时用这条路径兜底，用户即使不去开权限也能导入绝大多数应用。
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
+    <!--
+        电源优化白名单。
+
+        声明它只是让 ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 这个意图
+        不抛 SecurityException；它本身不授予任何能力，最终仍要用户在系统弹窗上
+        点"允许"。为什么这对本项目是刚需：虚拟应用从宿主进程 fork，
+        Doze 回收时按宿主 uid 判定，宿主一旦被判为"可优化"，
+        整个进程组会在熄屏后被一起冻结。
+
+        Google Play 对这条权限有政策限制，本工程不通过商店分发。
+    -->
+    <uses-permission
+        android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+        tools:ignore="BatteryLife" />
+
+    <!--
+        API 24/25 的快捷方式走的是 legacy 广播（com.android.launcher.action.INSTALL_SHORTCUT），
+        那条路需要 INSTALL_SHORTCUT 权限。API 26 起改用 ShortcutManager，不再需要。
+        所以限定 maxSdkVersion，避免在新系统上多要一个无用的权限。
+    -->
+    <uses-permission
+        android:name="com.android.launcher.permission.INSTALL_SHORTCUT"
+        android:maxSdkVersion="25" />
+
+    <application
+        android:name=".DoobleApp"
+        android:allowBackup="false"
+        android:extractNativeLibs="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Dooble"
+        tools:targetApi="34">
+
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.Dooble"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- 从文件管理器"用 Dooble 打开"装进空间 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/vnd.android.package-archive" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/vnd.android.package-archive" />
+            </intent-filter>
+        </activity>
+
+        <!-- 空间内虚拟进程的宿主 Service，真引擎会在此进程内 fork 虚拟应用进程 -->
+        <service
+            android:name=".service.SpaceKeeperService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="maintain_virtual_app_process" />
+        </service>
+
+        <!--
+            桌面快捷方式的落地点。透明主题 + 不进最近任务 + 不留在返回栈里：
+            用户从桌面图标进入时，应当"按下即进入目标应用"，中间没有多余界面。
+            必须 exported：拉起它的是系统启动器，不是本应用。
+        -->
+        <activity
+            android:name=".system.ShortcutLaunchActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true"
+            android:taskAffinity="com.dooble.space.shortcut"
+            android:theme="@style/Theme.Dooble.Trampoline" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+
+</manifest>

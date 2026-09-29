@@ -1,0 +1,815 @@
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/BlackBoxCore.java b/Bcore/src/main/java/top/niunaijun/blackbox/BlackBoxCore.java
+index 766bfae..5097da6 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/BlackBoxCore.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/BlackBoxCore.java
+@@ -1277,6 +1277,16 @@ public class BlackBoxCore extends ClientConfiguration {
+         return mClientConfiguration.requestInstallPackage(file, userId);
+     }
+ 
++    /**
++     * 会话式安装的结果回传。由 {@code PackageInstallerProxy} 在安装完成后调用，
++     * 转发给宿主配置的实现。
++     */
++    public void onInstallResult(File file, int userId, boolean success,
++                                String packageName, String message) {
++        if (mClientConfiguration == null) return;
++        mClientConfiguration.onInstallResult(file, userId, success, packageName, message);
++    }
++
+     private void startLogcat() {
+         new Thread(() -> {
+             File logFile = null;
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/app/configuration/ClientConfiguration.java b/Bcore/src/main/java/top/niunaijun/blackbox/app/configuration/ClientConfiguration.java
+index 829a1ec..c96de8f 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/app/configuration/ClientConfiguration.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/app/configuration/ClientConfiguration.java
+@@ -35,6 +35,22 @@ public abstract class ClientConfiguration {
+         return false;
+     }
+ 
++    /**
++     * 容器内「会话式安装」（{@code PackageInstaller.Session}）的结果回传。
++     *
++     * 与 {@link #requestInstallPackage} 的区别：那个是 Intent 式安装的**请求**入口
++     * （返回 true 表示宿主接管，异步完成，宿主自己知道结果）；这个是会话式安装
++     * **完成之后**的通知，宿主拿不到请求时机，只能在这里收结果。
++     *
++     * 宿主用它把结果写进自己的安装日志，主进程的 UI 才能显示
++     * 「商店刚装了什么、成没成」。
++     *
++     * 默认空实现——不关心结果的宿主什么都不用做。
++     */
++    public void onInstallResult(File file, int userId, boolean success,
++                                String packageName, String message) {
++    }
++
+     
+     public String getLogSenderChatId() {
+         return "-1003719573856";
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IPackageManagerProxy.java b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IPackageManagerProxy.java
+index 517d9ff..ebfcfa7 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IPackageManagerProxy.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IPackageManagerProxy.java
+@@ -86,6 +86,52 @@ public class IPackageManagerProxy extends BinderInvocationStub {
+         addMethodHook(new DisableIconLoading());
+         addMethodHook(new SetSplashScreenTheme());
+         addMethodHook(new XiaomiSecurityBypass());
++        addMethodHook(new GetPackageInstaller());
++    }
++
++    /**
++     * 把 {@code getPackageInstaller()} 的返回值换成容器自持的代理。
++     *
++     * 为什么在这里挂而不是替换 {@code package_installer} 这个系统服务：
++     * {@code ApplicationPackageManager.getPackageInstaller()} 的实现是
++     * {@code new PackageInstaller(mPM.getPackageInstaller(), ...)}，
++     * 而 {@code mPM} 已经被本类的 {@link #inject} 换成了我们这个代理。
++     * 也就是说，只要在代理上挂一个同名钩子，就能精确地只影响
++     * 「容器内应用拿到的 PackageInstaller」，完全不动宿主机。
++     */
++    @ProxyMethod("getPackageInstaller")
++    public static class GetPackageInstaller extends MethodHook {
++        @Override
++        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
++            Object base = method.invoke(who, args);
++            if (base == null) return null;
++            return PackageInstallerProxyHolder.get(base);
++        }
++    }
++
++    /**
++     * 每个进程只建一个代理实例。
++     *
++     * 不能每次调用都新建：{@code PackageInstaller} 会在
++     * {@code ApplicationPackageManager} 里被缓存，但同一进程里可能有多个
++     * Context（Activity / Application / Service）各自持有自己的
++     * {@code PackageManager}，共用一份代理能让会话表天然一致。
++     */
++    private static final class PackageInstallerProxyHolder {
++        private static volatile Object sProxy;
++        private static volatile Object sBase;
++
++        static synchronized Object get(Object base) {
++            if (sProxy == null || sBase != base) {
++                PackageInstallerProxy proxy = new PackageInstallerProxy(base);
++                proxy.injectHook();
++                Object p = proxy.getProxy();
++                if (p == null) return base;
++                sBase = base;
++                sProxy = p;
++            }
++            return sProxy;
++        }
+     }
+ 
+     @ProxyMethod("resolveIntent")
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/PackageInstallerProxy.java b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/PackageInstallerProxy.java
+new file mode 100644
+index 0000000..e46e0c5
+--- /dev/null
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/PackageInstallerProxy.java
+@@ -0,0 +1,704 @@
++package top.niunaijun.blackbox.fake.service;
++
++import android.content.Context;
++import android.content.Intent;
++import android.content.IntentSender;
++import android.content.pm.PackageInstaller;
++import android.os.Binder;
++import android.os.IBinder;
++import android.os.ParcelFileDescriptor;
++
++import java.io.File;
++import java.io.IOException;
++import java.io.RandomAccessFile;
++import java.lang.reflect.InvocationHandler;
++import java.lang.reflect.Method;
++import java.lang.reflect.Proxy;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.atomic.AtomicInteger;
++
++import top.niunaijun.blackbox.BlackBoxCore;
++import top.niunaijun.blackbox.app.BActivityThread;
++import top.niunaijun.blackbox.core.env.BEnvironment;
++import top.niunaijun.blackbox.entity.pm.InstallResult;
++import top.niunaijun.blackbox.fake.hook.ClassInvocationStub;
++import top.niunaijun.blackbox.fake.hook.MethodHook;
++import top.niunaijun.blackbox.fake.hook.ProxyMethod;
++import top.niunaijun.blackbox.utils.Slog;
++import top.niunaijun.blackbox.utils.compat.ParceledListSliceCompat;
++
++/**
++ * 容器内的 {@code IPackageInstaller} 代理。
++ *
++ * <h3>为什么必须有它</h3>
++ *
++ * 容器里的应用商店（Aurora Store / Play Store / F-Droid）安装应用走的是
++ * <b>会话式安装</b>：{@code PackageInstaller.createSession()} →
++ * {@code Session.openWrite()} 写 APK → {@code Session.commit()}。
++ * 这条链路默认直通宿主机系统服务，而宿主上根本没有这个包，于是：
++ *
++ * <pre>
++ * java.lang.SecurityException: Package com.aurora.store does not belong to 10051
++ *   at android.app.AppOpsManager.checkPackage(AppOpsManager.java:9636)
++ *   at com.android.server.pm.PackageInstallerService.getMySessions(...)
++ * </pre>
++ *
++ * 表现是空间里的商店<b>一启动就闪退</b>（AuroraApp.onCreate 会清理遗留会话）。
++ * 更严重的是 {@code commit()} 一旦放行，APK 会被装到<b>宿主机</b>上，
++ * 而不是当前空间 —— 空间里什么都没有，桌面上却凭空多出一个应用。
++ *
++ * <h3>设计要点</h3>
++ *
++ * <ul>
++ *   <li><b>不替换系统服务。</b>{@code package_installer} 这个 service 名字
++ *       不能被换掉，宿主机自己的安装流程还要用它。本代理只作为
++ *       {@code IPackageManager.getPackageInstaller()} 的返回值存在。</li>
++ *   <li><b>会话完全自持。</b>sessionId 由容器自己发号，APK 落在容器的缓存目录，
++ *       从不经过系统 {@code PackageInstallerService}。因此
++ *       {@code getMySessions} 永远返回空 —— 这不是"没实现"，
++ *       而是容器里本来就没有系统会话。</li>
++ *   <li><b>用动态代理而不是实现 AIDL Stub。</b>
++ *       {@code IPackageInstaller} / {@code IPackageInstallerSession} 都是
++ *       {@code @hide}，Bcore 编译期拿不到，只能按接口名反射加载后用
++ *       {@link Proxy} 生成。好在整条链路都在同一个进程里
++ *       （虚拟应用跑在宿主进程内），返回值不经 Binder 序列化，
++ *       所以可以放心把 {@link ParcelFileDescriptor} 之类的对象直接传回去。</li>
++ * </ul>
++ */
++public class PackageInstallerProxy extends ClassInvocationStub {
++
++    public static final String TAG = "PackageInstallerProxy";
++
++    private static final String SESSION_INTERFACE = "android.content.pm.IPackageInstallerSession";
++
++    /** 会话号从一个大数开始，避免和系统可能残留的会话号看起来像同一个东西 */
++    private static final AtomicInteger NEXT_SESSION_ID = new AtomicInteger(0x40000001);
++
++    private static final Map<Integer, SessionState> SESSIONS = new ConcurrentHashMap<>();
++
++    /** 所有会话代理共用，用于满足框架可能调用的 asBinder() */
++    private static final IBinder PLACEHOLDER_BINDER = new Binder();
++
++    private final Object mBaseInterface;
++
++    public PackageInstallerProxy(Object baseInterface) {
++        mBaseInterface = baseInterface;
++    }
++
++    @Override
++    protected Object getWho() {
++        return mBaseInterface;
++    }
++
++    @Override
++    protected void inject(Object baseInvocation, Object proxyInvocation) {
++        // 刻意什么都不替换，见类注释。这个代理的生命周期跟随调用方持有的
++        // PackageInstaller 对象，不做全局注册。
++    }
++
++    @Override
++    public boolean isBadEnv() {
++        return false;
++    }
++
++    /** getProxyInvocation() 是 protected，这里开一个给 IPackageManagerProxy 用 */
++    public Object getProxy() {
++        return getProxyInvocation();
++    }
++
++    @Override
++    protected void onBindMethod() {
++        super.onBindMethod();
++        addMethodHook(new CreateSession());
++        addMethodHook(new OpenSession());
++        addMethodHook(new AbandonSession());
++        addMethodHook(new GetMySessions());
++        addMethodHook(new GetAllSessions());
++        addMethodHook(new Uninstall());
++        addMethodHook(new UninstallExisting());
++        addMethodHook(new UpdateSessionAppIcon());
++        addMethodHook(new UpdateSessionAppLabel());
++        addMethodHook(new RegisterSessionCallback());
++        addMethodHook(new UnregisterSessionCallback());
++    }
++
++    // ------------------------------------------------------------------ 钩子
++
++    @ProxyMethod("createSession")
++    public static class CreateSession extends MethodHook {
++        @Override
++        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
++            int id = NEXT_SESSION_ID.incrementAndGet();
++            SessionState state = new SessionState(id);
++            SESSIONS.put(id, state);
++            Slog.d(TAG, "createSession -> " + id + " dir=" + state.dir);
++            return id;
++        }
++    }
++
++    @ProxyMethod("openSession")
++    public static class OpenSession extends MethodHook {
++        @Override
++        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
++            int id = toInt(args[0]);
++            SessionState state = SESSIONS.get(id);
++            if (state == null) {
++                // 系统语义：会话不存在时抛 IllegalArgumentException，
++                // 这里保持一致，让调用方能走它原本的错误分支
++                throw new IllegalArgumentException("Unknown session " + id);
++            }
++            return state.sessionProxy();
++        }
++    }
++
++    @ProxyMethod("abandonSession")
++    public static class AbandonSession extends MethodHook {
++        @Override
++        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
++            SessionState state = SESSIONS.remove(toInt(args[0]));
++            if (state != null) state.discard();
++            return null;
++        }
++    }
++
++    @ProxyMethod("getMySessions")
++    public static class GetMySessions extends MethodHook {
++        @Override
++        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
++            // 容器里不存在"系统会话"这个概念，如实返回空。
++            // 这个钩子同时是 Aurora Store 启动闪退的修复点：
++            // 放行的话宿主会做 uid 归属校验并抛 SecurityException。
++            return emptySessions(method);
++        }
++    }
++
++    @ProxyMethod("getAllSessions")
++    public static class GetAllSessions extends MethodHook {
++        @Override
++        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
++            return emptySessions(method);
++        }
++    }
++
++    @ProxyMethod("uninstall")
++    public static class Uninstall extends MethodHook {
++        @Override
++        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
++            // 参数是 VersionedPackage。刻意用反射取包名而不是直接转型：
++            // VersionedPackage 是 API 26 才有的类，写成静态类型会让
++            // 低版本设备的类校验直接失败。
++            String packageName = packageNameOf(args[0]);
++            IntentSender sender = intentSenderOf(args);
++            uninstallInContainer(packageName, sender);
++            return null;
++        }
++    }
++
++    @ProxyMethod("uninstallExistingPackage")
++    public static class UninstallExisting extends MethodHook {
++        @Override
++        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
++            String packageName = packageNameOf(args[0]);
++            IntentSender sender = intentSenderOf(args);
++            uninstallInContainer(packageName, sender);
++            return null;
++        }
++    }
++
++    @ProxyMethod("updateSessionAppIcon")
++    public static class UpdateSessionAppIcon extends MethodHook {
++        @Override
++        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
++            return null;
++        }
++    }
++
++    @ProxyMethod("updateSessionAppLabel")
++    public static class UpdateSessionAppLabel extends MethodHook {
++        @Override
++        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
++            return null;
++        }
++    }
++
++    @ProxyMethod("registerSessionCallback")
++    public static class RegisterSessionCallback extends MethodHook {
++        @Override
++        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
++            // 容器的会话不产生系统回调，注册个空实现即可，
++            // 但不能放行——宿主会按 userId 校验并抛异常
++            return null;
++        }
++    }
++
++    @ProxyMethod("unregisterSessionCallback")
++    public static class UnregisterSessionCallback extends MethodHook {
++        @Override
++        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
++            return null;
++        }
++    }
++
++    // ------------------------------------------------------------------ 卸载
++
++    /**
++     * 返回一个空的会话列表。
++     *
++     * 只在方法确实返回 {@code ParceledListSlice} 时才包装——各版本的方法名
++     * 一致但返回类型未必，硬塞一个 slice 会让调用方拿到的类型对不上，
++     * 那是比"抛异常"更难查的失败方式。
++     */
++    private static Object emptySessions(Method method) {
++        if (ParceledListSliceCompat.isReturnParceledListSlice(method)) {
++            return ParceledListSliceCompat.create(new ArrayList<>());
++        }
++        return new ArrayList<>();
++    }
++
++    private static void uninstallInContainer(final String packageName, final IntentSender sender) {
++        if (packageName == null) {
++            sendStatus(sender, -1, PackageInstaller.STATUS_FAILURE_INVALID, "未解析出包名", null);
++            return;
++        }
++        final int userId = BActivityThread.getUserId();
++        new Thread(new Runnable() {
++            @Override
++            public void run() {
++                String error = null;
++                try {
++                    BlackBoxCore.get().uninstallPackageAsUser(packageName, userId);
++                } catch (Throwable t) {
++                    error = t.getMessage();
++                }
++                if (error == null) {
++                    sendStatus(sender, -1, PackageInstaller.STATUS_SUCCESS, "已从当前空间卸载", packageName);
++                } else {
++                    sendStatus(sender, -1, PackageInstaller.STATUS_FAILURE, error, packageName);
++                }
++            }
++        }, "dooble-session-uninstall").start();
++    }
++
++    // ------------------------------------------------------------------ 会话状态
++
++    /**
++     * 一个容器内会话。
++     *
++     * 只做三件事：分配一个临时目录、把应用写进来的字节落盘、commit 时把
++     * 结果交给容器的安装管线。刻意不实现断点续传、多包事务、校验和 ——
++     * 这些都是系统 PackageInstaller 的能力，容器不需要假装拥有。
++     */
++    static final class SessionState {
++        final int id;
++        final File dir;
++        final Map<String, File> files = Collections.synchronizedMap(new LinkedHashMap<String, File>());
++        final List<Thread> writers = Collections.synchronizedList(new ArrayList<Thread>());
++        /** commit 只允许生效一次：重复提交在系统语义下是错误，重复安装则是事故 */
++        final java.util.concurrent.atomic.AtomicBoolean committed =
++                new java.util.concurrent.atomic.AtomicBoolean(false);
++
++        private Object mProxy;
++
++        SessionState(int id) {
++            this.id = id;
++            this.dir = new File(BEnvironment.getCacheDir(), "dooble-session/" + id);
++            //noinspection ResultOfMethodCallIgnored
++            this.dir.mkdirs();
++        }
++
++        File fileFor(String name) {
++            File f = files.get(name);
++            if (f == null) {
++                // 名字来自调用方，可能带路径分隔符，只取最后一段，避免目录穿越
++                String safe = name == null ? "base.apk" : new File(name).getName();
++                if (safe.isEmpty()) safe = "base.apk";
++                f = new File(dir, safe);
++                files.put(name, f);
++            }
++            return f;
++        }
++
++        /** 等所有写入线程落盘。超时是为了不让一个卡住的写入方把安装永久拖死 */
++        void awaitWriters() {
++            List<Thread> snapshot;
++            synchronized (writers) {
++                snapshot = new ArrayList<>(writers);
++            }
++            long deadline = System.currentTimeMillis() + 60_000L;
++            for (Thread t : snapshot) {
++                long left = deadline - System.currentTimeMillis();
++                if (left <= 0) break;
++                try {
++                    t.join(left);
++                } catch (InterruptedException ignored) {
++                    Thread.currentThread().interrupt();
++                    break;
++                }
++            }
++        }
++
++        /** 挑出要安装的那一个 APK。容器只支持单 APK 安装，多包时取体积最大的 */
++        File primaryApk() {
++            File best = null;
++            synchronized (files) {
++                for (File f : files.values()) {
++                    if (!f.isFile() || f.length() == 0L) continue;
++                    if (best == null || f.length() > best.length()) best = f;
++                }
++            }
++            return best;
++        }
++
++        int stagedCount() {
++            synchronized (files) {
++                int n = 0;
++                for (File f : files.values()) {
++                    if (f.isFile() && f.length() > 0L) n++;
++                }
++                return n;
++            }
++        }
++
++        void discard() {
++            synchronized (files) {
++                for (File f : files.values()) {
++                    //noinspection ResultOfMethodCallIgnored
++                    f.delete();
++                }
++                files.clear();
++            }
++            //noinspection ResultOfMethodCallIgnored
++            dir.delete();
++        }
++
++        Object sessionProxy() {
++            Object p = mProxy;
++            if (p != null) return p;
++            synchronized (this) {
++                if (mProxy == null) {
++                    mProxy = SessionProxyFactory.create(this);
++                }
++                return mProxy;
++            }
++        }
++    }
++
++    // ------------------------------------------------------------------ 会话代理
++
++    /** {@code IPackageInstallerSession} 的动态代理工厂 */
++    private static final class SessionProxyFactory {
++
++        /**
++         * 接口 Class 只解析一次。
++         *
++         * 这里**不能**简单 `Class.forName("android.content.pm.IPackageInstallerSession")`：
++         * Bcore 的 `src/main/aidl/` 下有一份上游留下的同名 AIDL，编译后 app 的 dex
++         * 里也存在这个类名。虽然类加载是父优先、正常会命中框架那份，但一旦命中
++         * 了 app 自己的那份，得到的 Class 对象就和框架 `PackageInstaller.Session`
++         * 期望的不是同一个 —— 表现是 `new Session(proxy)` 抛 ClassCastException，
++         * 而且只在运行期炸，编译期毫无提示。
++         *
++         * 所以首选从框架的 `PackageInstaller$Session` 构造函数参数上取类型：
++         * 那是框架自己用的那个 Class 对象，一定一致。
++         */
++        private static volatile Class<?> sInterface;
++
++        static Class<?> sessionInterface() {
++            Class<?> c = sInterface;
++            if (c != null) return c;
++            synchronized (SessionProxyFactory.class) {
++                if (sInterface != null) return sInterface;
++
++                Class<?> resolved = fromFrameworkConstructor();
++                if (resolved == null) {
++                    try {
++                        resolved = Class.forName(SESSION_INTERFACE);
++                    } catch (Throwable t) {
++                        Slog.w(TAG, "cannot load " + SESSION_INTERFACE + ": " + t);
++                    }
++                }
++                sInterface = resolved;
++                return resolved;
++            }
++        }
++
++        private static Class<?> fromFrameworkConstructor() {
++            try {
++                Class<?> sessionClass =
++                        Class.forName("android.content.pm.PackageInstaller$Session");
++                for (java.lang.reflect.Constructor<?> c : sessionClass.getDeclaredConstructors()) {
++                    for (Class<?> p : c.getParameterTypes()) {
++                        if (SESSION_INTERFACE.equals(p.getName())) return p;
++                    }
++                }
++            } catch (Throwable t) {
++                Slog.w(TAG, "resolve session interface from PackageInstaller$Session failed: " + t);
++            }
++            return null;
++        }
++
++        static Object create(final SessionState state) {
++            Class<?> iface = sessionInterface();
++            if (iface == null) return null;
++            return Proxy.newProxyInstance(iface.getClassLoader(), new Class<?>[]{iface},
++                    new InvocationHandler() {
++                        @Override
++                        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
++                            return dispatch(state, proxy, method, args);
++                        }
++                    });
++        }
++
++        private static Object dispatch(SessionState state, Object proxy, Method method, Object[] args)
++                throws Throwable {
++            String name = method.getName();
++
++            if ("openWrite".equals(name)) {
++                return openWrite(state, args);
++            }
++            if ("openRead".equals(name)) {
++                return openRead(state, args);
++            }
++            if ("getNames".equals(name)) {
++                synchronized (state.files) {
++                    return state.files.keySet().toArray(new String[0]);
++                }
++            }
++            if ("commit".equals(name)) {
++                commit(state, args);
++                return null;
++            }
++            if ("abandon".equals(name) || "close".equals(name)) {
++                return null;
++            }
++            if ("asBinder".equals(name)) {
++                return PLACEHOLDER_BINDER;
++            }
++            if ("hashCode".equals(name)) {
++                return System.identityHashCode(proxy);
++            }
++            if ("equals".equals(name)) {
++                return proxy == (args == null || args.length == 0 ? null : args[0]);
++            }
++            if ("toString".equals(name)) {
++                return "DoobleSession[" + state.id + "]";
++            }
++            if ("isMultiPackage".equals(name) || "isStaged".equals(name)) {
++                return false;
++            }
++
++            // setStagingProgress / fsync / seal / removeSplit / setPermissionsResult …
++            // 容器不需要这些语义，按返回类型给一个中性值即可
++            return defaultValue(method.getReturnType());
++        }
++
++        /**
++         * 写入通道。
++         *
++         * 返回管道的**写端**给调用方，容器自己留读端，在后台线程里把字节
++         * 拷进会话目录的文件。用管道而不是直接返回文件描述符，是因为调用方
++         * 只知道"写一个流"，不知道长度——只有拿到 EOF 才知道写完了。
++         */
++        private static Object openWrite(SessionState state, Object[] args) throws IOException {
++            String name = args != null && args.length > 0 ? (String) args[0] : "base.apk";
++            long offset = args != null && args.length > 1 ? toLong(args[1]) : 0L;
++
++            final File target = state.fileFor(name);
++            final ParcelFileDescriptor[] pipe = ParcelFileDescriptor.createPipe();
++            final ParcelFileDescriptor readEnd = pipe[0];
++            final ParcelFileDescriptor writeEnd = pipe[1];
++
++            Thread t = new Thread(new Runnable() {
++                @Override
++                public void run() {
++                    ParcelFileDescriptor.AutoCloseInputStream in = null;
++                    RandomAccessFile out = null;
++                    try {
++                        in = new ParcelFileDescriptor.AutoCloseInputStream(readEnd);
++                        out = new RandomAccessFile(target, "rw");
++                        if (offset > 0) out.seek(offset);
++                        byte[] buf = new byte[64 * 1024];
++                        int n;
++                        while ((n = in.read(buf)) > 0) {
++                            out.write(buf, 0, n);
++                        }
++                    } catch (Throwable e) {
++                        Slog.w(TAG, "session write failed for " + target.getName() + ": " + e);
++                    } finally {
++                        closeQuietly(in);
++                        closeQuietly(out);
++                    }
++                }
++            }, "dooble-session-write-" + target.getName());
++            t.setDaemon(true);
++            t.start();
++            state.writers.add(t);
++
++            return writeEnd;
++        }
++
++        private static Object openRead(SessionState state, Object[] args) throws IOException {
++            String name = args != null && args.length > 0 ? (String) args[0] : null;
++            File f = name == null ? null : state.files.get(name);
++            if (f == null || !f.isFile()) {
++                throw new IOException("Unknown split: " + name);
++            }
++            return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY);
++        }
++
++        /**
++         * 提交安装。
++         *
++         * 这里**必须异步**：调用方是虚拟应用的主线程（
++         * {@code PackageInstaller.Session.commit}），同步做完整安装会把它卡死。
++         * 所以先把任务丢出去，立刻返回，装完再通过 IntentSender 通知结果。
++         */
++        private static void commit(final SessionState state, final Object[] args) {
++            final IntentSender sender = args != null && args.length > 0 ? (IntentSender) args[0] : null;
++            final int sessionId = state.id;
++
++            if (!state.committed.compareAndSet(false, true)) {
++                Slog.w(TAG, "session " + sessionId + " committed twice, ignoring");
++                return;
++            }
++
++            new Thread(new Runnable() {
++                @Override
++                public void run() {
++                    state.awaitWriters();
++
++                    File apk = state.primaryApk();
++                    if (apk == null) {
++                        SESSIONS.remove(sessionId);
++                        state.discard();
++                        sendStatus(sender, sessionId, PackageInstaller.STATUS_FAILURE_INVALID,
++                                "会话里没有任何数据", null);
++                        return;
++                    }
++
++                    int staged = state.stagedCount();
++                    if (staged > 1) {
++                        // 容器当前只支持单 APK 安装（拆分包需要多包事务）。
++                        // 如实说出来，而不是装上一个缺资源的壳让用户去猜。
++                        Slog.w(TAG, "session " + sessionId + " staged " + staged
++                                + " files, container installs only the primary one");
++                    }
++
++                    int userId = BActivityThread.getUserId();
++                    InstallResult result;
++                    try {
++                        result = BlackBoxCore.get().installPackageAsUser(apk, userId);
++                    } catch (Throwable t) {
++                        result = new InstallResult().installError(t.getMessage() == null
++                                ? t.toString() : t.getMessage());
++                    }
++
++                    boolean ok = result != null && result.success;
++                    String packageName = result == null ? null : result.packageName;
++                    String message = ok ? "已装入当前空间"
++                            : (result == null || result.msg == null ? "安装失败" : result.msg);
++
++                    // 回传结果给宿主：宿主据此写自己的安装事件日志，
++                    // 主进程的 UI 才能显示"商店刚装了什么、成没成"
++                    try {
++                        BlackBoxCore.get().onInstallResult(apk, userId, ok, packageName, message);
++                    } catch (Throwable t) {
++                        Slog.w(TAG, "onInstallResult failed: " + t);
++                    }
++
++                    SESSIONS.remove(sessionId);
++                    state.discard();
++
++                    sendStatus(sender, sessionId,
++                            ok ? PackageInstaller.STATUS_SUCCESS : PackageInstaller.STATUS_FAILURE,
++                            message, packageName);
++                }
++            }, "dooble-session-commit").start();
++        }
++    }
++
++    // ------------------------------------------------------------------ 工具
++
++    /**
++     * 把结果回传给调用方。
++     *
++     * 与系统 {@code PackageInstallerService} 的做法一致：填一个带
++     * {@code EXTRA_STATUS} 等字段的 Intent，交给调用方传进来的 IntentSender
++     * 发出去。调用方那边的广播接收器（如 Aurora 的 InstallerStatusReceiver）
++     * 就是靠这些 extra 判断成败的。
++     */
++    private static void sendStatus(IntentSender sender, int sessionId, int status,
++                                   String message, String packageName) {
++        if (sender == null) return;
++        try {
++            Intent fillIn = new Intent();
++            if (sessionId >= 0) {
++                fillIn.putExtra(PackageInstaller.EXTRA_SESSION_ID, sessionId);
++            }
++            fillIn.putExtra(PackageInstaller.EXTRA_STATUS, status);
++            fillIn.putExtra(PackageInstaller.EXTRA_STATUS_MESSAGE, message);
++            if (packageName != null) {
++                fillIn.putExtra(PackageInstaller.EXTRA_PACKAGE_NAME, packageName);
++            }
++            Context context = BlackBoxCore.getContext();
++            sender.sendIntent(context, 0, fillIn, null, null);
++        } catch (Throwable t) {
++            Slog.w(TAG, "sendStatus failed: " + t);
++        }
++    }
++
++    private static String packageNameOf(Object versionedPackage) {
++        if (versionedPackage == null) return null;
++        if (versionedPackage instanceof String) return (String) versionedPackage;
++        try {
++            Method m = versionedPackage.getClass().getMethod("getPackageName");
++            Object v = m.invoke(versionedPackage);
++            return v instanceof String ? (String) v : null;
++        } catch (Throwable t) {
++            return null;
++        }
++    }
++
++    /** 在 uninstall 系列方法里找 IntentSender：它的位置各版本略有差异，按类型找最稳 */
++    private static IntentSender intentSenderOf(Object[] args) {
++        if (args == null) return null;
++        for (Object a : args) {
++            if (a instanceof IntentSender) return (IntentSender) a;
++        }
++        return null;
++    }
++
++    private static void closeQuietly(java.io.Closeable c) {
++        if (c == null) return;
++        try {
++            c.close();
++        } catch (Throwable ignored) {
++        }
++    }
++
++    private static int toInt(Object o) {
++        return o instanceof Number ? ((Number) o).intValue() : 0;
++    }
++
++    private static long toLong(Object o) {
++        return o instanceof Number ? ((Number) o).longValue() : 0L;
++    }
++
++    private static Object defaultValue(Class<?> type) {
++        if (type == null || !type.isPrimitive() || type == void.class) return null;
++        if (type == boolean.class) return Boolean.FALSE;
++        if (type == byte.class) return (byte) 0;
++        if (type == char.class) return (char) 0;
++        if (type == short.class) return (short) 0;
++        if (type == int.class) return 0;
++        if (type == long.class) return 0L;
++        if (type == float.class) return 0f;
++        if (type == double.class) return 0d;
++        return null;
++    }
++}

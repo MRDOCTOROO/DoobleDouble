@@ -1,0 +1,71 @@
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+/app/build
+/engine/build
+/gms/build
+/native/build
+
+# microG 离线包体积较大，不入库
+#   full 变体：构建时由 :app:fetchMicroG 自动拉取
+#   通用预置：tools/fetch-microg.sh
+/app/src/full/assets/microg/*.apk
+/gms/src/main/assets/microg/*.apk
+
+# Bcore 虚拟化引擎产物（bcore.aar 含 native 库；black-reflection.jar 是它的
+# 运行时依赖，AAR 不传递）。均由 tools/build-bcore.sh 从上游源码构建后产出，
+# 见 docs/03-构建与使用.md
+#
+# ⚠️ 例外：这两个**必须入库**，否则 GitHub Actions 编译不出来。
+# 重建它们需要完整的上游工具链（nbb-src 源码 + JDK 21 + NDK 29 + 打 5 个补丁），
+# 在 CI 里复现这套环境不划算。体积合计约 2.2MB，可接受。
+# 改动补丁后记得本地跑 tools/build-bcore.sh 并把这个 AAR 一起提交，
+# 否则 CI 用的是旧引擎，会出现「本地好的、CI 出来的坏了」这种最难查的问题。
+#
+# 注意顺序：gitignore 是**后面的规则覆盖前面的**，所以 `!` 必须写在
+# `*` 通配之后，否则白写（这个坑踩过一次）。
+/engine/libs/*.aar
+/engine/libs/*.jar
+!/engine/libs/bcore.aar
+!/engine/libs/black-reflection.jar
+
+# 签名密钥库与口令：绝不入库。
+# CI 从 GitHub Secrets 取（KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD），
+# 见 .github/workflows/android.yml。本地构建时把 jks 与 keystore.properties
+# 放进这个目录即可（tools/gen-release-keystore.sh 会生成）。
+/keystore/
+
+# 本地测试用的自签证书与密钥库（由 tools/gen-test-cert.sh 生成）
+# 绝不能让证书进版本库——哪怕它只是一张自签测试证书
+/local/signature/
+
+# 本地调试产物：模拟器截图、临时抓包等。整个 local/ 都不该进版本库
+/local/shots/
+
+# 生成补丁时的中间快照（tools 里的 .patch 才是产物，这些只是工作目录）
+/local/patchgen/
+
+# 真实 Google 平台证书：合规红线，永不入库
+# tools/extract-gms-cert.sh 从使用者自备的 GMS APK 里导出它，产物落在
+# local/signature/ 下。这里再加一条通配规则兜底——宁可多忽略，不可漏放。
+/google_platform.der
+*.der
+**/assets/signature/*.der
+
+# 本地测试用的 APK 副本（从 build/outputs 拷出来的稳定路径，方便 adb install）
+/dist/
+
+# Kotlin 编译器的错误日志（每次构建失败都会往里写，与源码无关）
+/.kotlin/
+
+# WorkBuddy AI 的本地记忆与工作日志。
+# 里面有大量本机绝对路径（C:/Users/admin/...），换台机器就没意义了；
+# 而且它不是工程的一部分，放进来只会让 clone 下来的人困惑。
+/.workbuddy-ai/

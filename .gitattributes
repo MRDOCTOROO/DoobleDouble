@@ -1,0 +1,38 @@
+# ---------------------------------------------------------------------------
+# 行尾策略：**显式约定，不靠 core.autocrlf**
+#
+# 本工程开发在 Windows、CI 在 Linux。两边的 core.autocrlf 默认值不同
+# （Windows 常是 true、Linux 是 input/false），于是同一个文件在不同机器上
+# 结出来的行尾可能不一样。对 .kt/.xml 无所谓，但有两个地方会直接炸：
+#
+#  1. `gradlew`（shell 脚本）带 CRLF 时在 Linux 上会报
+#     `/usr/bin/env: 'sh\r': No such file or directory`；
+#  2. `tools/bcore-patch/*.patch` 带 CRLF 时 `git apply` 会整体失败 ——
+#     而且报错信息只说 "Patch does not apply cleanly"，极难联想到行尾。
+#
+# 所以：一律 LF，Windows 批处理除外。
+# ---------------------------------------------------------------------------
+
+* text=auto eol=lf
+
+# Windows 批处理必须 CRLF，否则 cmd 解析会出问题
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 显式钉死：这几个文件绝不能因为平台差异被改写
+gradlew text eol=lf
+*.sh text eol=lf
+*.patch text eol=lf
+*.py text eol=lf
+
+# 二进制：不要做任何行尾/编码转换
+*.jar binary
+*.aar binary
+*.apk binary
+*.jks binary
+*.keystore binary
+*.png binary
+*.jpg binary
+*.webp binary
+*.so binary
+*.dex binary

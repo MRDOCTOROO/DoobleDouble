@@ -1,0 +1,562 @@
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/BlackBoxCore.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/BlackBoxCore.java
+@@ -25,6 +25,7 @@
+ import java.lang.reflect.Field;
+ import java.lang.reflect.Method;
+ import java.util.ArrayList;
++import java.util.Collections;
+ import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
+@@ -1265,6 +1266,26 @@
+         return mClientConfiguration.isDisableFlagSecure();
+     }
+ 
++    /**
++     * 容器内可用的商店包名，按优先级排列。
++     *
++     * 由 {@code ActivityManagerCommonProxy} 在"商店链接谁都认不出来"时使用，
++     * 用来把 {@code market://} / {@code play.google.com} 这类链接重定向到
++     * 容器内的商店，而不是放行到宿主系统。
++     *
++     * 配置缺失时返回空列表（= 不重定向），而不是 null —— 调用方不必做空判断。
++     *
++     * 注意：这个方法**必须**离 {@link #onInstallResult} 至少 4 行。
++     * 补丁集是顺序应用的，如果两个补丁的改动落在彼此的 3 行上下文窗口里，
++     * 后一个补丁会让前一个补丁的 `--reverse --check` 探测失效，
++     * build-bcore.sh 会把"已应用"误判成"上游改了代码"而中止。
++     */
++    public List<String> getStorePackages() {
++        if (mClientConfiguration == null) return Collections.emptyList();
++        List<String> stores = mClientConfiguration.getStorePackages();
++        return stores != null ? stores : Collections.emptyList();
++    }
++
+ 
+ 
+     @Override
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/app/configuration/ClientConfiguration.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/app/configuration/ClientConfiguration.java
+@@ -1,6 +1,8 @@
+ package top.niunaijun.blackbox.app.configuration;
+ 
+ import java.io.File;
++import java.util.Collections;
++import java.util.List;
+ 
+ 
+ public abstract class ClientConfiguration {
+@@ -55,4 +57,25 @@
+     public String getLogSenderChatId() {
+         return "-1003719573856";
+     }
++
++    /**
++     * 容器内可用的应用商店包名，**按优先级排列**。
++     *
++     * ## 为什么需要它
++     *
++     * 空间里的应用经常用商店链接互相唤起：
++     * {@code market://details?id=xxx} 或
++     * {@code https://play.google.com/store/apps/details?id=xxx}。
++     * 如果容器里没有能匹配这个 intent-filter 的组件，链接会一路放行到
++     * **宿主系统**，最后在宿主机上打开浏览器或原版商店 ——
++     * 用户看到的是"我在空间里点了更新，结果跳到空间外面去了"。
++     *
++     * 容器在 {@code resolveActivity} 落空之后会拿这份列表逐个试
++     * {@code setPackage(商店包名)}，命中就把这条链接交给容器内的商店。
++     *
++     * 返回空列表表示不做重定向，链接按系统默认行为处理。
++     */
++    public List<String> getStorePackages() {
++        return Collections.emptyList();
++    }
+ }
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/ActivityManagerCommonProxy.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/ActivityManagerCommonProxy.java
+@@ -91,6 +91,11 @@
+                         StartActivityCompat.getResolvedType(args),
+                         BActivityThread.getUserId());
+                 if (resolveInfo == null) {
++                    // 容器里没有任何组件匹配 —— 但在放弃之前，先试试"这会不会是一条
++                    // 商店链接"。见 resolveStoreIntent() 的注释。
++                    resolveInfo = resolveStoreIntent(intent);
++                }
++                if (resolveInfo == null) {
+                     intent.setPackage(origPackage);
+                     return method.invoke(who, args);
+                 }
+@@ -127,6 +132,102 @@
+             }
+             return null;
+         }
++
++        /**
++         * 把商店链接重定向到容器内的商店。
++         *
++         * ## 要解决的问题
++         *
++         * 空间里的应用（游戏内购页、应用内"更新"按钮、别人的分享链接）经常用
++         * {@code market://details?id=xxx} 或
++         * {@code https://play.google.com/store/apps/details?id=xxx} 去唤起商店。
++         *
++         * 容器里装的是 Aurora Store 这类第三方客户端，它们的 intent-filter
++         * 往往只声明了 {@code scheme=market} 而没有覆盖 {@code https} + host 的
++         * 组合；一旦 {@code resolveActivity} 落空，Bcore 会把这条 intent
++         * **原样交给宿主系统** —— 结果是宿主机上的浏览器或原版商店被拉起来，
++         * 用户看到的是"我在空间里点的，怎么跳到空间外面去了"。
++         *
++         * 所以这里做最后一次尝试：拿宿主声明的商店包名列表（
++         * {@code ClientConfiguration.getStorePackages()}）逐个
++         * {@code setPackage()} 再解析一次。命中就交给容器内的商店。
++         *
++         * ## 为什么只在 resolveActivity 落空后才走这一步
++         *
++         * 空间里如果本来就有能处理这条链接的应用（比如用户装了某个浏览器），
++         * 那就该听用户的 —— 强行改道到商店反而是错的。只有在"容器里谁都不认"
++         * 的前提下重定向，语义才是清晰的。
++         */
++        private ResolveInfo resolveStoreIntent(Intent intent) {
++            if (!isStoreIntent(intent)) {
++                return null;
++            }
++
++            java.util.List<String> stores = BlackBoxCore.get().getStorePackages();
++            if (stores == null || stores.isEmpty()) {
++                return null;
++            }
++
++            int userId = BActivityThread.getUserId();
++            for (String pkg : stores) {
++                if (pkg == null || pkg.trim().isEmpty()) {
++                    continue;
++                }
++                // 用副本探测，避免探测失败时把原 intent 改脏
++                Intent probe = new Intent(intent);
++                probe.setComponent(null);
++                probe.setPackage(pkg);
++
++                ResolveInfo info = BlackBoxCore.getBPackageManager().resolveActivity(
++                        probe, GET_META_DATA, null, userId);
++                if (info != null && info.activityInfo != null) {
++                    Slog.d(TAG, "Redirect store intent to container store: " + pkg);
++                    intent.setComponent(null);
++                    intent.setPackage(pkg);
++                    return info;
++                }
++            }
++            return null;
++        }
++
++        /**
++         * 是不是一条"要去商店"的链接。
++         *
++         * 只认 ACTION_VIEW + 明确的商店 scheme/host。刻意不做得更"聪明"
++         * （比如按 URL 里有没有 {@code id=} 判断）—— 猜错会把正常的网页跳转
++         * 劫持到商店里，那比不处理更糟。
++         */
++        private boolean isStoreIntent(Intent intent) {
++            if (intent == null) {
++                return false;
++            }
++            // 显式指定了组件的，说明调用方已经知道要拉谁，不该被改道
++            if (intent.getComponent() != null) {
++                return false;
++            }
++            if (!Intent.ACTION_VIEW.equals(intent.getAction())) {
++                return false;
++            }
++            Uri data = intent.getData();
++            if (data == null) {
++                return false;
++            }
++
++            String scheme = data.getScheme();
++            if (scheme == null) {
++                return false;
++            }
++            if ("market".equalsIgnoreCase(scheme)) {
++                return true;
++            }
++
++            String host = data.getHost();
++            if (host == null) {
++                return false;
++            }
++            return host.equalsIgnoreCase("play.google.com")
++                    || host.equalsIgnoreCase("market.android.com");
++        }
+     }
+ 
+     @ProxyMethod("startActivities")
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/utils/compat/ActivityCompat.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/utils/compat/ActivityCompat.java
+@@ -10,15 +10,12 @@
+ import android.content.pm.PackageManager;
+ import android.content.res.TypedArray;
+ import android.graphics.Bitmap;
+-import android.graphics.drawable.Drawable;
+ import android.os.Build;
+ import android.view.WindowManager;
+ 
+ import black.android.app.BRActivity;
+ import black.com.android.internal.BRRstyleable;
+ import top.niunaijun.blackbox.BlackBoxCore;
+-import top.niunaijun.blackbox.app.BActivityThread;
+-import top.niunaijun.blackbox.utils.DrawableUtils;
+ 
+ 
+ public class ActivityCompat {
+@@ -50,18 +47,24 @@
+             Intent intent = activity.getIntent();
+             ApplicationInfo applicationInfo = baseContext.getApplicationInfo();
+             PackageManager pm = activity.getPackageManager();
++
++            // 只在任务根上设置。
++            //
++            // 最近任务卡片上的标题/图标取自**任务根** Activity 的 TaskDescription，
++            // 后面压进来的页面设置它不会改变卡片外观。反过来，如果这里不加限制，
++            // 空间里每开一个新页面都会把卡片标题改一遍，切回桌面时看到的名字会跳。
+             if (intent != null && activity.isTaskRoot()) {
+                 try {
+                     String label = TaskDescriptionCompat.getTaskDescriptionLabel(
+                             BlackBoxCore.getUserId(), applicationInfo.loadLabel(pm));
+ 
+-                    Bitmap icon = null;
+-                    Drawable drawable = getActivityIcon(activity);
+-                    if (drawable != null) {
+-                        ActivityManager am = (ActivityManager) baseContext.getSystemService(Context.ACTIVITY_SERVICE);
+-                        int iconSize = am.getLauncherLargeIconSize();
+-                        icon = DrawableUtils.drawableToBitmap(drawable, iconSize, iconSize);
+-                    }
++                    // 图标必须自己从虚拟 APK 的资源表里取。
++                    //
++                    // 刻意**不用** pm.getActivityIcon()：容器里的 IPackageManagerProxy
++                    // 把 getDrawable 打回 null（上游为规避资源错乱加的），
++                    // 于是那条路只会退化成一个通用机器人图标——空间里所有应用
++                    // 长得一模一样，正是这次要修的问题。
++                    Bitmap icon = TaskDescriptionCompat.loadAppIcon();
+ 
+                     activity.setTaskDescription(new ActivityManager.TaskDescription(label, icon));
+                 } catch (Throwable e) {
+@@ -70,17 +73,4 @@
+             }
+         }
+     }
+-
+-    private static Drawable getActivityIcon(Activity activity) {
+-        PackageManager pm = activity.getPackageManager();
+-        try {
+-            Drawable icon = pm.getActivityIcon(activity.getComponentName());
+-            if (icon != null)
+-                return icon;
+-        } catch (PackageManager.NameNotFoundException ignore) {
+-        }
+-
+-        ApplicationInfo applicationInfo = activity.getApplicationInfo();
+-        return applicationInfo.loadIcon(pm);
+-    }
+-}
+\ No newline at end of file
++}
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/utils/compat/TaskDescriptionCompat.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/utils/compat/TaskDescriptionCompat.java
+@@ -1,56 +1,274 @@
+ package top.niunaijun.blackbox.utils.compat;
+ 
+ import android.app.ActivityManager;
+-import android.content.Context;
+-import android.content.pm.PackageManager;
++import android.content.pm.ApplicationInfo;
++import android.content.res.Resources;
+ import android.graphics.Bitmap;
+ import android.graphics.drawable.Drawable;
+ 
+-import java.util.Locale;
+-
+ import top.niunaijun.blackbox.BlackBoxCore;
+ import top.niunaijun.blackbox.app.BActivityThread;
+ import top.niunaijun.blackbox.utils.DrawableUtils;
++import top.niunaijun.blackbox.utils.Slog;
+ 
++/**
++ * 任务描述（最近任务卡片上的标题与图标）。
++ *
++ * ## 为什么必须在这里做，而不是让系统自己算
++ *
++ * 虚拟 Activity 在系统眼里是宿主的 stub Activity（{@code top.niunaijun.blackbox.stub.*}），
++ * 它的 {@code ActivityInfo} 属于**宿主包**。系统构造最近任务卡片时，若拿不到显式的
++ * {@code TaskDescription}，就会用那个 stub 的 label 与 icon —— 于是空间里所有应用
++ * 在最近任务里长得**一模一样，全是宿主自己的名字和图标**。
++ *
++ * 唯一能让系统改口的办法，就是主动 {@code Activity.setTaskDescription()}。
++ * {@code ActivityCompat} 负责发起，本类负责把内容算对。
++ *
++ * ## 三个曾经的坑
++ *
++ * 1. **标题带了 {@code [B<userId>]} 前缀**。那是上游为了区分"这是哪个分身"加的
++ *    调试标记，但它会原样出现在用户的最近任务里。用户要的是真实应用名，
++ *    所以这里**不加任何前缀** —— 空间归属由容器自己的 UI 表达，不该污染系统 UI。
++ *
++ * 2. **图标被丢掉了**。旧实现重建 TaskDescription 时给 icon 传了 null，
++ *    于是卡片上只剩系统抓的截图，没有应用图标。
++ *
++ * 3. **label 会静默退化成包名**。{@code pm.getApplicationLabel(info)} 内部走
++ *    {@code mPM.getText(包名, labelRes, info)}，而宿主系统 PM 里没有这个包，
++ *    查不到就一路回退到 {@code packageName}。所以这里优先自己从**虚拟 APK 的
++ *    资源表**里取 {@code labelRes} / {@code icon}。
++ */
+ public class TaskDescriptionCompat {
++
++    private static final String TAG = "TaskDescriptionCompat";
++
++    /**
++     * 图标解码上限（px）。
++     *
++     * 最近任务卡片上的图标显示尺寸约 96dp，256px 在 2x 屏上仍然够用。
++     * 封顶是必须的：TaskDescription 要走 Binder 传给 system_server，
++     * 大位图会直接撑爆事务缓冲区（1MB 上限）。
++     */
++    private static final int MAX_ICON_PX = 256;
++
++    /**
++     * 修正容器内 Activity 的任务描述。
++     *
++     * 语义是"补全"而不是"覆盖"：应用自己设过的字段一律保留。
++     * 有些应用（比如 Aurora Store）会主动 {@code setTaskDescription} 一个带主题色的
++     * 描述，覆盖它只会让卡片变丑。
++     */
+     public static ActivityManager.TaskDescription fix(ActivityManager.TaskDescription td) {
++        if (td == null) {
++            return null;
++        }
++
+         String label = td.getLabel();
+         Bitmap icon = td.getIcon();
+ 
+-        if (label != null && icon != null)
++        // 应用自己把名字和图标都设全了 —— 尊重它的选择
++        if (label != null && icon != null) {
++            return td;
++        }
++
++        ApplicationInfo info = virtualApplicationInfo();
++
++        if (label == null) {
++            label = resolveLabel(info);
++        }
++        if (icon == null) {
++            icon = resolveIcon(info);
++        }
++
++        if (label == null && icon == null) {
+             return td;
++        }
+ 
+-        label = getTaskDescriptionLabel(BlackBoxCore.getUserId(), getApplicationLabel());
+-        
+-        
+-        
+-        
+-
+-        
+-        
+-        
+-        td = new ActivityManager.TaskDescription(label, null, td.getPrimaryColor());
+-        return td;
++        return new ActivityManager.TaskDescription(
++                label != null ? label : td.getLabel(),
++                icon,
++                td.getPrimaryColor());
+     }
+ 
++    /**
++     * 最近任务里显示的标题。
++     *
++     * 保留 {@code userId} 形参是为了不改动三处代理钩子与 {@code ActivityCompat} 的
++     * 调用点；**它不参与拼装** —— 见类注释第 1 条。
++     */
+     public static String getTaskDescriptionLabel(int userId, CharSequence label) {
+-        return String.format(Locale.CHINA, "[B%d]%s", userId, label);
++        if (label == null) {
++            return null;
++        }
++        String text = label.toString().trim();
++        return text.isEmpty() ? null : text;
++    }
++
++    /**
++     * 供 {@code ActivityCompat} 复用的图标入口。
++     *
++     * 抽出来是为了让"最近任务"这条链路上只有**一处**图标解析逻辑：
++     * 应用侧主动 {@code setTaskDescription} 时走 {@link #fix}，
++     * 容器侧替它设置时走这里，两条路结果必须一致。
++     */
++    public static Bitmap loadAppIcon() {
++        return resolveIcon(virtualApplicationInfo());
++    }
++
++    // ---------------------------------------------------------------- 解析
++
++    /**
++     * 拿到**虚拟应用**的 ApplicationInfo。
++     *
++     * {@code BlackBoxCore.getPackageManager()} 里的 PM 已被 {@code IPackageManagerProxy}
++     * 接管，所以按虚拟包名查出来的就是容器内那份信息（带 sourceDir / labelRes / icon）。
++     */
++    private static ApplicationInfo virtualApplicationInfo() {
++        String pkg = BlackBoxCore.getAppPackageName();
++        if (pkg == null || pkg.isEmpty()) {
++            return null;
++        }
++        try {
++            ApplicationInfo info = BlackBoxCore.getPackageManager().getApplicationInfo(pkg, 0);
++            if (info != null && info.sourceDir == null) {
++                // 有些路径下 Bcore 只填了 publicSourceDir，而资源加载认的是 sourceDir
++                info.sourceDir = info.publicSourceDir;
++            }
++            return info;
++        } catch (Throwable t) {
++            Slog.w(TAG, "getApplicationInfo(" + pkg + ") failed: " + t.getMessage());
++            return null;
++        }
++    }
++
++    private static String resolveLabel(ApplicationInfo info) {
++        if (info == null) {
++            return null;
++        }
++
++        // 1) 清单里直接写死的名字（少数应用会这么干）
++        if (info.nonLocalizedLabel != null) {
++            String s = info.nonLocalizedLabel.toString().trim();
++            if (!s.isEmpty()) {
++                return s;
++            }
++        }
++
++        // 2) 从虚拟 APK 的资源表里解 labelRes
++        if (info.labelRes != 0) {
++            String fromRes = textFromResources(info, info.labelRes);
++            if (fromRes != null) {
++                return fromRes;
++            }
++        }
++
++        // 3) 交给系统 PM —— 资源能加载时它也是对的，只是不保证
++        try {
++            CharSequence cs = BlackBoxCore.getPackageManager().getApplicationLabel(info);
++            if (cs != null) {
++                String s = cs.toString().trim();
++                if (!s.isEmpty() && !s.equals(info.packageName)) {
++                    return s;
++                }
++            }
++        } catch (Throwable ignore) {
++        }
++
++        // 4) 兜底用包名。它不好看，但**比宿主名强**：
++        //    显示成宿主名会让用户以为空间里所有应用都是同一个东西
++        return info.packageName;
++    }
++
++    private static Bitmap resolveIcon(ApplicationInfo info) {
++        if (info == null || info.icon == 0) {
++            return null;
++        }
++
++        Drawable drawable = drawableFromResources(info, info.icon);
++        if (drawable == null) {
++            // 退一步走 PM 的常规路径。注意容器里的 getDrawable 钩子会打回 null，
++            // 所以这条路基本只在宿主进程（比如 LauncherActivity）里有效
++            try {
++                drawable = info.loadIcon(BlackBoxCore.getPackageManager());
++            } catch (Throwable ignore) {
++            }
++        }
++        if (drawable == null) {
++            return null;
++        }
++
++        Bitmap bitmap = DrawableUtils.drawableToBitmap(drawable, MAX_ICON_PX, MAX_ICON_PX);
++        if (bitmap == null) {
++            return null;
++        }
++
++        // BitmapDrawable 快路径会直接返回原图，尺寸可能远超上限
++        if (bitmap.getWidth() > MAX_ICON_PX || bitmap.getHeight() > MAX_ICON_PX) {
++            bitmap = Bitmap.createScaledBitmap(
++                    bitmap,
++                    Math.min(bitmap.getWidth(), MAX_ICON_PX),
++                    Math.min(bitmap.getHeight(), MAX_ICON_PX),
++                    true);
++        }
++        return bitmap;
+     }
+ 
+-    private static CharSequence getApplicationLabel() {
++    // ---------------------------------------------------------------- 资源
++
++    /**
++     * 取虚拟应用自己的 {@link Resources}。
++     *
++     * 两个来源，按可靠性排序：
++     *  1. 虚拟进程里那个 Application 实例的 resources —— 它是 Bcore 按虚拟 APK
++     *     建出来的，**一定**是这一份，没有任何猜测成分；
++     *  2. {@code pm.getResourcesForApplication(info)} —— 靠 info.sourceDir 现场
++     *     加载，宿主进程里也能用（LauncherActivity 依赖的就是它）。
++     */
++    private static Resources resourcesOf(ApplicationInfo info) {
++        try {
++            android.app.Application app = BActivityThread.getApplication();
++            if (app != null && app.getResources() != null) {
++                return app.getResources();
++            }
++        } catch (Throwable ignore) {
++            // 宿主进程里没有 BActivityThread，忽略
++        }
++
+         try {
+-            PackageManager pm = BlackBoxCore.getPackageManager();
+-            return pm.getApplicationLabel(pm.getApplicationInfo(BlackBoxCore.getAppPackageName(), 0));
+-        } catch (PackageManager.NameNotFoundException e) {
++            return BlackBoxCore.getPackageManager().getResourcesForApplication(info);
++        } catch (Throwable t) {
++            Slog.w(TAG, "getResourcesForApplication failed: " + t.getMessage());
+             return null;
+         }
+     }
+ 
+-    private static Drawable getApplicationIcon() {
++    private static String textFromResources(ApplicationInfo info, int resId) {
++        Resources res = resourcesOf(info);
++        if (res == null) {
++            return null;
++        }
+         try {
+-            
++            CharSequence cs = res.getText(resId);
++            if (cs == null) {
++                return null;
++            }
++            String s = cs.toString().trim();
++            return s.isEmpty() ? null : s;
++        } catch (Throwable t) {
++            Slog.w(TAG, "getText(" + resId + ") failed: " + t.getMessage());
++            return null;
++        }
++    }
++
++    private static Drawable drawableFromResources(ApplicationInfo info, int resId) {
++        Resources res = resourcesOf(info);
++        if (res == null) {
+             return null;
+-        } catch (Exception ignore) {
++        }
++        try {
++            return res.getDrawable(resId, null);
++        } catch (Throwable t) {
++            Slog.w(TAG, "getDrawable(" + resId + ") failed: " + t.getMessage());
+             return null;
+         }
+     }

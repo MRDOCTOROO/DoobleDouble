@@ -1,0 +1,90 @@
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/core/system/pm/BPackageManagerService.java b/Bcore/src/main/java/top/niunaijun/blackbox/core/system/pm/BPackageManagerService.java
+index d5d0a05..b754698 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/core/system/pm/BPackageManagerService.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/core/system/pm/BPackageManagerService.java
+@@ -186,27 +186,68 @@ public class BPackageManagerService extends IBPackageManagerService.Stub impleme
+         return chooseBestActivity(intent, resolvedType, flags, resolves);
+     }
+ 
++    /**
++     * 从候选列表里挑一个。
++     *
++     * ## 与原实现（以及 AOSP）的差异
++     *
++     * 原实现照抄了 AOSP 的骨架，却在「排名前两位完全同权」的分支直接
++     * {@code return null}。AOSP 在这个分支做的是：先查用户偏好活动表
++     * （{@code findPreferredActivityNotLocked}），查不到就**构造一个
++     * ResolverActivity（"打开方式"选择器）返回** —— 它绝不会返回 null。
++     * 换句话说 AOSP 的语义是「有候选就一定给调用方一个答复」。
++     *
++     * 容器里既没有偏好活动表，也不该把宿主的选择器拉出来（它列的是宿主组件，
++     * 对空间内的应用没有意义），所以退化为：优先挑 {@code isDefault}
++     * （即过滤器带 {@code CATEGORY_DEFAULT}）的那条，其次退回列表首位。
++     * 这与 AOSP 自己最先用的判别条件（{@code r0.isDefault != r1.isDefault}）一致。
++     *
++     * ## 实测踩到的场景
++     *
++     * microG 的 GmsCore 一个包里声明了 3 条 ACTION_MAIN 过滤器：
++     * {@code MainSettingsActivity} 两条带 CATEGORY_DEFAULT、
++     * {@code SettingsActivity} 一条带 CATEGORY_LAUNCHER。
++     * 排序后前两条同权 → 原实现返回 null → FakeStore 的 MainActivity
++     * 拿到 null 再读 {@code activityInfo} 直接 NPE，容器内的商店就此打不开。
++     * 详见 docs/09。
++     *
++     * ## 为什么不用「补 MATCH_DEFAULT_ONLY」来消歧义
++     *
++     * 已核对 AOSP 主线：{@code ResolveIntentHelper.resolveIntentInternal} →
++     * {@code ComputerEngine.updateFlagsForResolve} 在 resolve 路径上**不会**
++     * 补 {@code MATCH_DEFAULT_ONLY}（该 flag 只在 {@code canForwardTo} 里手动加过）。
++     * 补它会让"过滤器不带 CATEGORY_DEFAULT 的隐式 intent"从"能解析"变成
++     * "解析不到"，属于引入回归，所以这里不动 flag 语义。
++     */
+     private ResolveInfo chooseBestActivity(Intent intent, String resolvedType,
+                                            int flags, List<ResolveInfo> query) {
+-        if (query != null) {
+-            final int N = query.size();
+-            if (N == 1) {
+-                return query.get(0);
+-            } else if (N > 1) {
+-                
+-                
+-                ResolveInfo r0 = query.get(0);
+-                ResolveInfo r1 = query.get(1);
+-                
+-                
+-                if (r0.priority != r1.priority
+-                        || r0.preferredOrder != r1.preferredOrder
+-                        || r0.isDefault != r1.isDefault) {
+-                    return query.get(0);
+-                }
++        if (query == null || query.isEmpty()) {
++            return null;
++        }
++        final int N = query.size();
++        if (N == 1) {
++            return query.get(0);
++        }
++
++        ResolveInfo r0 = query.get(0);
++        ResolveInfo r1 = query.get(1);
++        if (r0.priority != r1.priority
++                || r0.preferredOrder != r1.preferredOrder
++                || r0.isDefault != r1.isDefault) {
++            return r0;
++        }
++
++        // 前两条同权：优先取带 CATEGORY_DEFAULT 的，其次退回列表首位。
++        if (r0.isDefault) {
++            return r0;
++        }
++        for (int i = 1; i < N; i++) {
++            ResolveInfo ri = query.get(i);
++            if (ri != null && ri.isDefault) {
++                return ri;
+             }
+         }
+-        return null;
++        return r0;
+     }
+ 
+     private List<ResolveInfo> queryIntentActivities(Intent intent,
