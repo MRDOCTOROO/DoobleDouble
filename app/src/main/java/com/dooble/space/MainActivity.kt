@@ -1,6 +1,7 @@
 package com.dooble.space
 
 import android.Manifest
+import android.app.Application
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -97,9 +98,12 @@ sealed interface Screen {
 @Composable
 private fun DoobleRoot(pendingSpaceId: MutableStateFlow<String?>) {
     val boot by DoobleContainer.boot.collectAsState()
+    val app = LocalContext.current.applicationContext as Application
     when (val state = boot) {
         is BootState.Booting -> BootScreen()
-        is BootState.Failed -> BootFailureScreen(state.message)
+        is BootState.Failed -> BootFailureScreen(state.message, onRetry = {
+            DoobleContainer.retryBootstrap(app)
+        })
         is BootState.Ready -> DoobleMain(state, pendingSpaceId)
     }
 }
@@ -271,7 +275,7 @@ private fun BootScreen() {
 }
 
 @Composable
-private fun BootFailureScreen(message: String) {
+private fun BootFailureScreen(message: String, onRetry: () -> Unit) {
     Box(Modifier.fillMaxSize().background(Paper).padding(24.dp), contentAlignment = Alignment.Center) {
         BrutalSurface(background = Paper, contentPadding = 20.dp) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -282,7 +286,7 @@ private fun BootFailureScreen(message: String) {
                     style = MaterialTheme.typography.bodySmall,
                     color = InkSoft,
                 )
-                BrutalButton(text = "重试", onClick = { }, background = Acid, contentColor = Ink)
+                BrutalButton(text = "重试", onClick = onRetry, background = Acid, contentColor = Ink)
             }
         }
     }

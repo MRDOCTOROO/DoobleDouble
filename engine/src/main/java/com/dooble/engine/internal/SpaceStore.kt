@@ -19,6 +19,10 @@ import kotlinx.serialization.json.Json
  */
 class SpaceStore(private val root: java.io.File) {
 
+    private companion object {
+        const val TAG = "DoobleSpaceStore"
+    }
+
     @Serializable
     data class Record(
         val config: SpaceConfig,
@@ -77,9 +81,21 @@ class SpaceStore(private val root: java.io.File) {
     @Synchronized
     private fun load(): MutableMap<String, Record> {
         if (!file.exists()) return linkedMapOf()
-        return runCatching {
-            json.decodeFromString<Map<String, Record>>(file.readText()).toMutableMap()
-        }.getOrElse { linkedMapOf() }
+        val parsed = runCatching {
+            json.decodeFromString<Map<String, Record>>(file.readText())
+        }.getOrNull()
+        if (parsed != null) return parsed.toMutableMap()
+
+        // 解析失败绝不能当作"没有空间"处理：空表随后会被任意一次 put() 全量写回，
+        // 旧内容永久丢失——连着 bcoreUserId 映射一起丢，allocateUserId 会把已占用
+        // 的 userId 分给新空间，新空间直接继承上一个空间的应用与账号。
+        // 把坏文件改名留档（人还能手工抢救），再从空表起步。
+        val archive = java.io.File(root, "spaces.json.corrupt-${System.currentTimeMillis()}")
+        runCatching {
+            file.renameTo(archive)
+            android.util.Log.e(TAG, "spaces.json 解析失败，已留档到 ${archive.name}")
+        }
+        return linkedMapOf()
     }
 
     @Synchronized
@@ -88,7 +104,12 @@ class SpaceStore(private val root: java.io.File) {
             root.mkdirs()
             val tmp = java.io.File(root, "spaces.json.tmp")
             tmp.writeText(json.encodeToString(mapSerializer, cache.toMap()))
-            tmp.renameTo(file)
+            // renameTo 失败时返回 false 而不是抛异常——不检查的话磁盘上还是旧内容，
+            // 内存里却是新数据，两边静默分叉且无任何信号。失败就直接覆盖写兜底。
+            if (!tmp.renameTo(file)) {
+                file.writeText(json.encodeToString(mapSerializer, cache.toMap()))
+                tmp.delete()
+            }
         }
     }
 
@@ -108,6 +129,35 @@ class SpaceStore(private val root: java.io.File) {
     fun remove(spaceId: String) {
         cache.remove(spaceId)
         flush()
+    }
+
+    // ------------------------------------------------------------------ userId 高水位
+    //
+    // spaces.json 是"哪些 userId 已经分配出去"的唯一账本，但它可能损坏
+    // （损坏时本类会留档并从空表起步）。高水位文件是**第二本账**：只记录
+    // 历史上发出去过的最大 userId，跨删除单调递增、永不回退——
+    // 哪怕注册表从零重建，allocateUserId 也不会把旧 userId 发给新空间。
+
+    private val userIdFloorFile = java.io.File(root, "user-id-floor")
+
+    /** 历史上分配过的最大 userId。没有记录时返回 0（宿主保留值） */
+    @Synchronized
+    fun userIdFloor(): Int =
+        runCatching { userIdFloorFile.readText().trim().toInt() }.getOrDefault(0)
+
+    /** 记录"这个 userId 已经发出去过"。只升不降，失败静默（它只是兜底账本） */
+    @Synchronized
+    fun markUserIdUsed(id: Int) {
+        if (id <= userIdFloor()) return
+        runCatching {
+            root.mkdirs()
+            val tmp = java.io.File(root, "user-id-floor.tmp")
+            tmp.writeText(id.toString())
+            if (!tmp.renameTo(userIdFloorFile)) {
+                // renameTo 目标已存在时在部分 JVM 上会失败；直接覆盖写兜底
+                userIdFloorFile.writeText(id.toString())
+            }
+        }
     }
 
     /**

@@ -66,4 +66,23 @@ object MicroGRepository {
 
     /** 组件是否有官方直链 */
     fun isDownloadable(component: MicroGComponent): Boolean = component.downloadable
+
+    /**
+     * 该组件在上游 release 里的 SHA-256 摘要（hex，不含 `sha256:` 前缀）。
+     *
+     * 与 [candidates] 用**同一套仓库核对逻辑**（GmsCore 的资产列表拿去匹配
+     * GSF Proxy 前缀，匹配到就是装错包）。release 为 null（走了内置版本的
+     * 回退路径）或该资产没有 digest 时返回 null——此时下载方退化为
+     * 长度比对 + ZIP 结构校验，仍不能跳过完整性检查。
+     */
+    fun expectedDigest(
+        component: MicroGComponent,
+        huawei: Boolean = false,
+        release: MicroGVersionChecker.Release? = null,
+    ): String? {
+        if (release != null && release.repo == component.downloadRepo) {
+            return release.assetFor(component.packageName, huawei)?.digestSha256
+        }
+        return null
+    }
 }

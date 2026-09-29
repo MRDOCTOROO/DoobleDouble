@@ -1,6 +1,7 @@
 package com.dooble.engine.bcore
 
 import android.content.pm.Signature
+import com.dooble.engine.internal.BcoreStorageLayout
 import com.dooble.engine.internal.SpaceStore
 import com.dooble.engine.internal.SpoofPolicyCodec
 import top.niunaijun.blackbox.core.system.pm.PackageSignatureSpoofer
@@ -53,11 +54,9 @@ object BcoreSignatureSpoofer : PackageSignatureSpoofer.Hook {
     /** 策略缓存有效期。取 3 秒：改配置后感知足够快，又不至于每次查询都读盘 */
     private const val TTL_MS = 3_000L
 
-    private const val POLICY_RELATIVE = "data/.dooble/spoof_policy.json"
-
-    /** `<filesDir>/dooble`。由 [install] 注入 */
+    /** 宿主 `Context.filesDir`。由 [install] 注入；策略文件的路径统一由 [BcoreStorageLayout.spoofPolicyFile] 给出 */
     @Volatile
-    private var root: File? = null
+    private var filesRoot: File? = null
 
     /** userId -> 包名 -> 伪造签名 */
     @Volatile
@@ -69,16 +68,22 @@ object BcoreSignatureSpoofer : PackageSignatureSpoofer.Hook {
     /**
      * 注册钩子。由 `BcoreEngine.initialize()` 在**每个进程**里调用——
      * 尤其是容器服务进程，那里才是签名查询真正发生的地方。
+     *
+     * @param filesDir 宿主 `Context.filesDir`。策略文件路径由
+     *   [BcoreStorageLayout.spoofPolicyFile] 统一给出——与写入方
+     *   （gms 的 `GmsSignatureSpoof`）用的是**同一个函数**，两端各拼一份
+     *   字符串的历史事故（读方多了一段 `data/`，伪造整条链路静默失效）
+     *   不能再发生。
      */
-    fun install(rootDir: File) {
-        root = rootDir
+    fun install(filesDir: File) {
+        filesRoot = filesDir
         invalidate()
         PackageSignatureSpoofer.setHook(this)
     }
 
     fun uninstall() {
         PackageSignatureSpoofer.setHook(null)
-        root = null
+        filesRoot = null
         invalidate()
     }
 
@@ -118,16 +123,16 @@ object BcoreSignatureSpoofer : PackageSignatureSpoofer.Hook {
      * 远低于缓存失准的代价。
      */
     private fun buildTable(): Map<Int, Map<String, Array<Signature>>> {
-        val base = root ?: return emptyMap()
-        if (!base.isDirectory) return emptyMap()
+        val filesDir = filesRoot ?: return emptyMap()
+        if (!filesDir.isDirectory) return emptyMap()
 
         val result = HashMap<Int, Map<String, Array<Signature>>>()
 
-        SpaceStore(base).all().forEach { record ->
+        SpaceStore(File(filesDir, BcoreStorageLayout.ENGINE_ROOT_NAME)).all().forEach { record ->
             val userId = record.bcoreUserId
             if (userId <= 0) return@forEach
 
-            val policyFile = File(base, "virtual/${record.config.id}/$POLICY_RELATIVE")
+            val policyFile = BcoreStorageLayout.spoofPolicyFile(filesDir, record.config.id)
             val targets = readPolicy(policyFile)
             if (targets.isNotEmpty()) {
                 result[userId] = targets.toMap()

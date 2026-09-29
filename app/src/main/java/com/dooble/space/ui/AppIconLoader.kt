@@ -61,15 +61,19 @@ object AppIconLoader {
      *  2. 宿主已安装的同名包（虚拟目录被清掉时的兜底）
      *
      * 都拿不到返回 null，UI 会退回首字母方块。
+     *
+     * @param versionCode 缓存 key 的一部分：容器内**原地覆盖安装**时 APK 路径
+     *   不变、内容变了，key 不带版本的话 LruCache 会一直返回旧图标。
      */
     suspend fun forVirtualApp(
         context: Context,
         packageName: String,
         apkPath: String,
+        versionCode: Long = 0L,
     ): ImageBitmap? {
         val apk = apkPath.takeIf { it.isNotBlank() }?.let(::File)
         if (apk != null && apk.isFile && apk.length() > 0L) {
-            fromApk(context, apk.absolutePath)?.let { return it }
+            fromApk(context, apk.absolutePath, versionCode)?.let { return it }
         }
         return fromHostPackage(context, packageName)
     }
@@ -89,8 +93,8 @@ object AppIconLoader {
     }
 
     /** 从一个还没安装的 APK 文件取图标 */
-    suspend fun fromApk(context: Context, apkPath: String): ImageBitmap? {
-        val key = "apk:$apkPath"
+    suspend fun fromApk(context: Context, apkPath: String, versionCode: Long = 0L): ImageBitmap? {
+        val key = "apk:$apkPath@$versionCode"
         cache.get(key)?.let { return it }
         val loaded = withContext(Dispatchers.IO) {
             runCatching {
@@ -173,7 +177,8 @@ object AppIconLoader {
     }
 
     /** Drawable → ImageBitmap，带尺寸兜底与降采样 */
-    private fun decode(drawable: Drawable?, context: Context): ImageBitmap? {        drawable ?: return null
+    private fun decode(drawable: Drawable?, context: Context): ImageBitmap? {
+        drawable ?: return null
 
         val fallback = with(context.resources.displayMetrics) { (48f * density).toInt() }
             .coerceAtLeast(1)
@@ -214,14 +219,14 @@ fun rememberVirtualAppIcon(
     versionCode: Long,
 ): ImageBitmap? {
     val context = LocalContext.current
-    val key = "apk:$apkPath"
+    val key = "apk:$apkPath@$versionCode"
     val state = produceState<ImageBitmap?>(
         initialValue = AppIconLoader.peek(key),
         packageName,
         apkPath,
         versionCode,
     ) {
-        value = AppIconLoader.forVirtualApp(context, packageName, apkPath)
+        value = AppIconLoader.forVirtualApp(context, packageName, apkPath, versionCode)
     }
     return state.value
 }

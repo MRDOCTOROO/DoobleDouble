@@ -2,6 +2,7 @@ package com.dooble.gms
 
 import android.content.Context
 import com.dooble.engine.VirtualEngine
+import com.dooble.engine.internal.BcoreStorageLayout
 import com.dooble.engine.internal.Base64Codec
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -73,7 +74,10 @@ enum class SpoofMode {
  * 容器服务进程里的 `PackageSignatureSpoofer.Hook` 实现——因为签名查询发生在
  * 那边，跨进程同步一份内存状态没有必要，文件是最简单也最不会出错的一致性载体。
  *
- * 落盘位置：`<space>/data/.dooble/spoof_policy.json`
+ * 落盘位置：`<filesDir>/dooble/virtual/<spaceId>/.dooble/spoof_policy.json`。
+ * 路径由 `BcoreStorageLayout.spoofPolicyFile` 统一给出——读取方（容器服务进程里的
+ * `BcoreSignatureSpoofer`）用的是**同一个函数**。别自己另拼一份：曾经两端各拼一次、
+ * 读方多了一段 `data/`，文件永远找不到，签名伪造整条链路静默失效。
  */
 class GmsSignatureSpoof(
     private val context: Context,
@@ -142,9 +146,8 @@ class GmsSignatureSpoof(
      * 这样自检能区分「明确关闭」和「从未配置过」，这两种状态的排障方向完全不同。
      */
     fun apply(spaceId: String, mode: SpoofMode = currentMode(spaceId)): ApplyResult {
-        val dir = spaceDir(spaceId).resolve(".dooble")
-        dir.mkdirs()
-        val file = dir.resolve("spoof_policy.json")
+        val file = policyFile(spaceId)
+        file.parentFile?.mkdirs()
 
         if (mode == SpoofMode.OFF) {
             val policy = SpoofPolicy(mode = mode.name, targets = emptyList(), enabled = false)
@@ -179,7 +182,7 @@ class GmsSignatureSpoof(
     }
 
     fun policyOf(spaceId: String): SpoofPolicy? = runCatching {
-        val f = spaceDir(spaceId).resolve(".dooble/spoof_policy.json")
+        val f = policyFile(spaceId)
         if (!f.exists()) null else JSON.decodeFromString<SpoofPolicy>(f.readText())
     }.getOrNull()
 
@@ -268,8 +271,9 @@ class GmsSignatureSpoof(
     private fun digest(bytes: ByteArray, algorithm: String): String =
         MessageDigest.getInstance(algorithm).digest(bytes).joinToString("") { "%02x".format(it) }
 
-    private fun spaceDir(spaceId: String): File =
-        File(context.filesDir, "dooble/virtual/$spaceId")
+    /** 策略文件位置与容器读取方（BcoreSignatureSpoofer）严格同源，见 BcoreStorageLayout.spoofPolicyFile */
+    private fun policyFile(spaceId: String): File =
+        BcoreStorageLayout.spoofPolicyFile(context.filesDir, spaceId)
 
     private fun assetNameOf(mode: SpoofMode): String = when (mode) {
         SpoofMode.TEST -> CERT_ASSET_TEST

@@ -95,7 +95,9 @@ class StoreProvisioner(
     /** 取本地缓存，没有就下载。多镜像回退，与 microG 同一套思路 */
     private suspend fun resolveApk(onStep: (StoreStep) -> Unit): File? {
         val cached = File(cacheDir, CACHE_NAME)
-        if (cached.exists() && cached.length() > MIN_APK_BYTES) {
+        // 缓存命中必须过 ZIP 结构检查：之前只看大小，弱网下截断的坏 APK
+        // 一旦进缓存就**永久命中**，此后每次装配都在解析报错。
+        if (cached.exists() && cached.length() > MIN_APK_BYTES && looksLikeApk(cached)) {
             onStep(StoreStep(StorePhase.CHECK, "使用本地缓存的商店 APK", 0.3f))
             return cached
         }
@@ -108,42 +110,20 @@ class StoreProvisioner(
         return null
     }
 
-    private fun download(url: String, dest: File, onStep: (StoreStep) -> Unit): Boolean {
-        val tmp = File(dest.parentFile, "$CACHE_NAME.part")
-        return runCatching {
-            val conn = java.net.URI(url).toURL().openConnection()
-            conn.connectTimeout = 15_000
-            conn.readTimeout = 600_000
-            val total = conn.contentLengthLong
-
-            conn.getInputStream().use { input ->
-                tmp.outputStream().use { output ->
-                    val buf = ByteArray(64 * 1024)
-                    var done = 0L
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n <= 0) break
-                        output.write(buf, 0, n)
-                        done += n
-                        if (total > 0) {
-                            val p = 0.4f + 0.45f * (done.toFloat() / total)
-                            onStep(StoreStep(StorePhase.DOWNLOAD, "下载中 ${human(done)} / ${human(total)}", p))
-                        }
-                    }
+    /** 下载交给 [ApkHttp]：断点续传、同源重试退避、长度比对，与 microG 同一套实现 */
+    private fun download(url: String, dest: File, onStep: (StoreStep) -> Unit): Boolean =
+        ApkHttp.download(
+            url = url,
+            dest = dest,
+            connectTimeoutMs = 15_000,
+            readTimeoutMs = 60_000,
+            onProgress = { done, total ->
+                if (total > 0) {
+                    val p = 0.4f + 0.45f * (done.toFloat() / total)
+                    onStep(StoreStep(StorePhase.DOWNLOAD, "下载中 ${human(done)} / ${human(total)}", p))
                 }
-            }
-
-            if (tmp.length() < MIN_APK_BYTES) {
-                tmp.delete()
-                return false
-            }
-            tmp.renameTo(dest)
-            true
-        }.getOrElse {
-            tmp.delete()
-            false
-        }
-    }
+            },
+        )
 
     /** 清掉缓存（换版本或下载损坏时用） */
     fun clearCache() {

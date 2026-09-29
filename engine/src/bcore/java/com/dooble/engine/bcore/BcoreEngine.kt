@@ -125,7 +125,9 @@ class BcoreEngine private constructor() : VirtualEngine {
         // 注册签名伪造钩子。这一步必须在**每个进程**都执行，尤其是容器服务进程
         // （:black）——签名查询真正发生在那里，主进程注册了也没用。
         // 钩子本身只读策略文件、带缓存，不注入时容器行为与未打补丁时完全一致。
-        BcoreSignatureSpoofer.install(root)
+        // 传 filesDir：策略文件路径统一由 BcoreStorageLayout.spoofPolicyFile 计算，
+        // 与写入方（gms.GmsSignatureSpoof）严格同源。
+        BcoreSignatureSpoofer.install(ctx.filesDir)
 
         // 若宿主没走 bootstrapHost（例如引擎是运行期才探测到的），
         // 这里补一次最小初始化，避免 doCreate 时状态缺失。
@@ -172,7 +174,13 @@ class BcoreEngine private constructor() : VirtualEngine {
         used += 0 // 宿主保留
         var candidate = 1
         while (candidate in used) candidate++
+        // 高水位兜底：spaces.json 一旦损坏重建（见 SpaceStore.load 的留档处理），
+        // 内存注册表就认不出"哪些 userId 已经发出去过"——而 Bcore 侧旧 user 的
+        // 数据目录还在，复用等于让新空间直接继承上一个空间的应用与账号。
+        // 高水位文件跨删除单调递增、永不回退，从根上堵死这条路。
+        candidate = maxOf(candidate, store.userIdFloor() + 1)
         store.get(spaceId)?.let { store.put(it.copy(bcoreUserId = candidate)) }
+        store.markUserIdUsed(candidate)
         return candidate
     }
 
@@ -191,9 +199,26 @@ class BcoreEngine private constructor() : VirtualEngine {
     override suspend fun deleteSpace(spaceId: String) {
         withContext(Dispatchers.IO) {
             val userId = userIdOf(spaceId)
-            if (userId > 0) runCatching { core.deleteUser(userId) }
+            if (userId > 0) {
+                runCatching { core.deleteUser(userId) }
+                // deleteUser 返回 void：Bcore 侧删失败了**不会抛异常**，必须回查确认。
+                // 删失败却照常释放记录的话，这个 userId 立刻能被 allocateUserId
+                // 分给新空间，Bcore 里没删干净的应用与账号会被新空间整个继承。
+                // 回查失败（拿不到用户列表）时按"还在"处理：宁可不让删，不让用户重试。
+                val stillThere = runCatching {
+                    core.getUsers().any { it.id == userId }
+                }.getOrDefault(true)
+                if (stillThere) {
+                    error("容器删除 userId=$userId 未完成，已保留空间记录，请重试删除")
+                }
+            }
+            // 先删目录、后删记录：中途失败/被杀时记录还在，重试能继续；
+            // 反过来先删记录，残留目录就永远没人认领了（无任何入口能再清它）。
+            val dir = virtualRoot.resolve(spaceId)
+            if (dir.exists() && !dir.deleteRecursively()) {
+                error("空间目录删除失败，已保留空间记录，请重试")
+            }
             store.remove(spaceId)
-            virtualRoot.resolve(spaceId).deleteRecursively()
             Unit
         }
     }
@@ -240,7 +265,9 @@ class BcoreEngine private constructor() : VirtualEngine {
     override suspend fun uninstall(spaceId: String, packageName: String) {
         withContext(Dispatchers.IO) {
             val userId = userIdOf(spaceId)
-            runCatching { core.uninstallPackageAsUser(packageName, userId) }
+            // userId<=0 说明空间不存在或尚未分配：打给 user 0 等于操作宿主保留区，
+            // 与 launch/resolveActivity 的防护保持一致
+            if (userId > 0) runCatching { core.uninstallPackageAsUser(packageName, userId) }
             store.get(spaceId)?.let { rec ->
                 store.put(rec.copy(apps = rec.apps.filterNot { it.packageName == packageName }))
             }
@@ -276,7 +303,11 @@ class BcoreEngine private constructor() : VirtualEngine {
         }
 
     override suspend fun stop(spaceId: String, packageName: String) {
-        runCatching { core.stopPackage(packageName, userIdOf(spaceId)) }
+        // userId<=0 时空间本身没就绪，容器里不可能有它的进程；
+        // 放行会让 stopPackage 打到宿主保留的 user 0 上
+        val userId = userIdOf(spaceId)
+        if (userId <= 0) return
+        runCatching { core.stopPackage(packageName, userId) }
     }
 
     /**

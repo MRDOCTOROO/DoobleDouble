@@ -40,7 +40,19 @@ object MicroGVersionChecker {
          */
         val repo: String = GMS_CORE_REPO,
     ) {
-        data class Asset(val name: String, val url: String, val sizeBytes: Long)
+        data class Asset(
+            val name: String,
+            val url: String,
+            val sizeBytes: Long,
+            /**
+             * 上游声明的 SHA-256（小写 hex，不含 `sha256:` 前缀）。
+             *
+             * GitHub release API 现已提供 `digest` 字段。之前组装 [Asset] 时把它丢了，
+             * 导致下载链路对"镜像（ghfast.top 等第三方代理）可能替换字节"毫无防御
+             * ——那是用户输入 Google 账号密码的组件，必须校验后才能进缓存。
+             */
+            val digestSha256: String? = null,
+        )
 
         /** 按包名前缀找资产。hw 后缀是华为变体，需要显式指定 */
         fun assetFor(packageName: String, huawei: Boolean = false): Asset? {
@@ -98,11 +110,16 @@ object MicroGVersionChecker {
                         val a = arr.getJSONObject(i)
                         val name = a.optString("name")
                         if (!name.endsWith(".apk")) continue
+                        val digest = a.optString("digest")
                         add(
                             Release.Asset(
                                 name = name,
                                 url = a.optString("browser_download_url"),
                                 sizeBytes = a.optLong("size"),
+                                digestSha256 = digest
+                                    .takeIf { it.startsWith("sha256:") }
+                                    ?.substringAfter("sha256:")
+                                    ?.lowercase(),
                             )
                         )
                     }

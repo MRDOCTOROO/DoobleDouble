@@ -71,6 +71,44 @@ object BcoreStorageLayout {
     fun externalUserDir(externalFilesDir: File?, userId: Int): File? =
         externalRoot(externalFilesDir)?.let { File(it, "storage/emulated/$userId") }
 
+    // ------------------------------------------------------------------
+    // Dooble 自己的空间私有元数据（不是 Bcore 的布局，但同属"落盘契约"）
+    //
+    // 下面这些写在 Dooble 的空间目录 `<filesDir>/dooble/virtual/<spaceId>/` 下：
+    // gms 模块是写入方，容器服务进程（BcoreSignatureSpoofer 等）是读取方。
+    // 路径必须**全部**从本文件取，禁止任何一端就地拼字符串 ——
+    // 曾经读方比写方多拼了一段 `data/`，策略文件永远找不到，
+    // 签名伪造整条链路静默失效且无任何报错（用户看到的是"开了没效果"）。
+    // ------------------------------------------------------------------
+
+    /** Dooble 引擎自身的目录名：`<filesDir>/dooble` */
+    const val ENGINE_ROOT_NAME = "dooble"
+
+    /** 空间私有元数据目录名（相对空间目录） */
+    const val META_DIR_NAME = ".dooble"
+
+    /**
+     * 签名伪造策略文件，相对空间目录的路径。
+     * 写入方：`gms.GmsSignatureSpoof.apply`；读取方：`bcore.BcoreSignatureSpoofer`。
+     */
+    const val SPOOF_POLICY_RELATIVE = "$META_DIR_NAME/spoof_policy.json"
+
+    /** 设备指纹伪装配置文件，相对空间目录的路径（写入方 `gms.DeviceProfileSpoofer`） */
+    const val DEVICE_PROFILE_RELATIVE = "$META_DIR_NAME/device_profile.json"
+
+    /**
+     * 签名伪造策略文件的**绝对落盘位置**——读写两端唯一允许的取法。
+     *
+     * @param filesDir 宿主 `Context.filesDir`（读取方手里若只有 `<filesDir>/dooble`
+     *   这一层，请从 BcoreEngine 一路把 filesDir 传下来，不要自己再拼一层）
+     */
+    fun spoofPolicyFile(filesDir: File, spaceId: String): File =
+        File(virtualSpaceDir(filesDir, spaceId), SPOOF_POLICY_RELATIVE)
+
+    /** Dooble 的空间目录：`<filesDir>/dooble/virtual/<spaceId>` */
+    fun virtualSpaceDir(filesDir: File, spaceId: String): File =
+        File(File(filesDir, ENGINE_ROOT_NAME), "virtual/$spaceId")
+
     /**
      * 一个空间实际占用的全部目录。
      *

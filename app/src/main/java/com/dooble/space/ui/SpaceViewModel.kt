@@ -30,6 +30,7 @@ import com.dooble.space.system.ShortcutPublisher
 import com.dooble.space.system.TaskCleaner
 import com.dooble.space.system.VirtualTaskResolver
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -73,6 +74,15 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
     private val _provisionReport = MutableStateFlow<ProvisionReport?>(null)
     val provisionReport: StateFlow<ProvisionReport?> = _provisionReport.asStateFlow()
 
+    /**
+     * 各空间的「谷歌环境是否就绪」。
+     *
+     * 这个判定要跑一次 `engine.listApps`（重 IO），**绝不能在 Composable 里现算**
+     * ——那是 主线程 IO × 重组次数 × 空间数 的乘法，装配期间 step 高频更新触发
+     * 连续重组时会直接把主线程打死。所以在每次 refreshSpaces 时顺带在 IO 线程算好。
+     */
+    private val _provisioned = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+
     private val _report = MutableStateFlow<SelfCheckReport?>(null)
     val report: StateFlow<SelfCheckReport?> = _report.asStateFlow()
 
@@ -95,6 +105,9 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _hostApps = MutableStateFlow<List<HostAppInfo>>(emptyList())
     val hostApps: StateFlow<List<HostAppInfo>> = _hostApps.asStateFlow()
+
+    /** 当前在跑的宿主扫描。新扫描必须先取消旧的，见 [scanHostApps] */
+    private var hostScanJob: Job? = null
 
     private val _hostScanning = MutableStateFlow(false)
     val hostScanning: StateFlow<Boolean> = _hostScanning.asStateFlow()
@@ -221,8 +234,14 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshSpaces() {
         viewModelScope.launch {
             runCatching {
-                _spaces.value = withContext(Dispatchers.IO) { engine.listSpaces() }
+                val list = withContext(Dispatchers.IO) { engine.listSpaces() }
                     .sortedByDescending { it.config.createdAt }
+                _spaces.value = list
+                _provisioned.value = withContext(Dispatchers.IO) {
+                    list.associate {
+                        it.id to runCatching { DoobleContainer.selfCheck.isProvisioned(it.id) }.getOrDefault(false)
+                    }
+                }
             }.onFailure { _toast.value = "读取空间失败：${it.message}" }
         }
     }
@@ -236,12 +255,22 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
         // 内存回收时不能动——否则切回来就是一次冷启动
         KeeperControl.pin(getApplication(), id)
         if (id != null) {
-            refreshApps()
-            refreshAccounts()
-            refreshSpoof()
+            // 异步刷新完成之前先清空上一个空间的状态：refreshApps/refreshAccounts
+            // 都是挂起调用，不清的话详情页会把 A 空间的应用、账号、签名模式
+            // 挂在 B 空间的标题下——比"短暂空白"糟得多。
+            _apps.value = emptyList()
+            _accounts.value = emptyList()
+            _recentInstalls.value = emptyList()
+            _spoofMode.value = SpoofMode.OFF
+            _spoofCert.value = null
+            _storeStep.value = null
+            _storeReport.value = null
             _hostApps.value = emptyList()
             _report.value = null
             _provisionReport.value = null
+            refreshApps()
+            refreshAccounts()
+            refreshSpoof()
         }
     }
 
@@ -353,13 +382,18 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _busy.value = true
             _storeStep.value = null
-            val report = DoobleContainer.storeProvisioner.provision(id) { step ->
-                _storeStep.value = step
-            }
-            _storeReport.value = report
-            _toast.value = report.message
-            refreshApps()
-            refreshSpaces()
+            // 与文件里其他写操作一致必须 runCatching：引擎侧一抛异常，
+            // 协程直接崩进程；就算不崩，下面的 `_busy.value = false` 也执行不到，
+            // 所有 `enabled = !busy` 的按钮会永久禁用。
+            runCatching {
+                val report = DoobleContainer.storeProvisioner.provision(id) { step ->
+                    _storeStep.value = step
+                }
+                _storeReport.value = report
+                _toast.value = report.message
+                refreshApps()
+                refreshSpaces()
+            }.onFailure { _toast.value = "装入商店失败：${it.message}" }
             _busy.value = false
         }
     }
@@ -379,23 +413,27 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
             _toast.value = "请先进入一个空间"
             return
         }
+        val ctx = getApplication<Application>()
+        val tmp = File(ctx.cacheDir, "import_${System.currentTimeMillis()}.apk")
         viewModelScope.launch {
             _busy.value = true
-            runCatching {
-                val ctx = getApplication<Application>()
-                val tmp = File(ctx.cacheDir, "import_${System.currentTimeMillis()}.apk")
-                withContext(Dispatchers.IO) {
-                    ctx.contentResolver.openInputStream(uri)?.use { input ->
-                        tmp.outputStream().use { input.copyTo(it) }
-                    } ?: error("无法读取所选文件")
-                }
-                val app = withContext(Dispatchers.IO) { engine.installApk(id, tmp) }
+            try {
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        ctx.contentResolver.openInputStream(uri)?.use { input ->
+                            tmp.outputStream().use { input.copyTo(it) }
+                        } ?: error("无法读取所选文件")
+                    }
+                    val app = withContext(Dispatchers.IO) { engine.installApk(id, tmp) }
+                    _toast.value = "已装入：${app.label}"
+                    refreshApps()
+                    refreshSpaces()
+                }.onFailure { _toast.value = "装入失败：${it.message}" }
+            } finally {
+                // 成功失败都要删：临时副本留在 cacheDir 里就是 100MB 级的纯垃圾
                 tmp.delete()
-                _toast.value = "已装入：${app.label}"
-                refreshApps()
-                refreshSpaces()
-            }.onFailure { _toast.value = "装入失败：${it.message}" }
-            _busy.value = false
+                _busy.value = false
+            }
         }
     }
 
@@ -407,7 +445,11 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun scanHostApps(query: String = "") {
         hostQuery = query
-        viewModelScope.launch {
+        // 每个字符都会触发一次全量扫描。不取消上一次的话：两个扫描并发跑在
+        // IO 线程池，慢的那个后完成，列表显示的就是旧查询词的结果——
+        // 搜索框写着 "abc"，列表却是 "ab" 的，而且永远不会自己变对。
+        hostScanJob?.cancel()
+        hostScanJob = viewModelScope.launch {
             _hostScanning.value = true
             runCatching {
                 val scanner = DoobleContainer.hostScanner
@@ -555,6 +597,10 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 val app = withContext(Dispatchers.IO) { engine.installApk(id, apk, system = false) }
+                // 装完后临时副本就没用了：Bcore 装入时会把 APK 复制进自己的
+                // data/app（按包名存），组件导入也会另拷一份进缓存。
+                // 不删的话 cacheDir/imported-apk 只进不出，100MB+ 的文件会一直堆。
+                runCatching { apk.delete() }
                 _toast.value = "已装入：${app.label}"
                 refreshApps()
                 refreshSpaces()
@@ -627,10 +673,14 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
                 // 引擎只杀进程，不动 system_server 里的 TaskRecord —— 进程死了
                 // 最近任务里的卡片照样躺着，用户会认为"结束运行没生效"。
                 // 宿主侧按 stub intent 里的虚拟包名反查并收掉（见 TaskCleaner）。
-                // 必须带上 userId：同一应用可能在多个空间里都开着，
-                // 只收当前空间的那张卡片，否则另一个空间的实例会被"断掉入口"。
-                withContext(Dispatchers.IO) {
-                    TaskCleaner.removeTasksOf(getApplication(), packageName, taskUserIdOf(id))
+                // 必须带上 userId：同一应用可能在多个空间里都开着。
+                // 空间列表还没加载出来时 taskUserIdOf 返回 null，而 removeTasksOf
+                // 对 null 的语义是"不过滤、全收"——那会把**别的空间**同名应用的
+                // 卡片也收掉。宁可漏收一张卡片，不能断掉另一个空间的入口。
+                taskUserIdOf(id)?.let { uid ->
+                    withContext(Dispatchers.IO) {
+                        TaskCleaner.removeTasksOf(getApplication(), packageName, uid)
+                    }
                 }
                 _toast.value = "已结束运行：$packageName"
             }.onFailure { _toast.value = "结束运行失败：${it.message}" }
@@ -764,10 +814,15 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
         val id = _currentSpaceId.value ?: return
         viewModelScope.launch {
             _busy.value = true
-            provisionInto(id, huaweiVariant, includeOptional)
-            _toast.value =
-                if (_provisionReport.value?.success == true) "谷歌环境就绪"
-                else "环境不完整，请查看自检"
+            // 必须兜住：provisionInto 里是下载 + 引擎调用，任何一环抛异常
+            // （空间目录被外部清理、Binder 死亡……）都不该把协程炸掉——
+            // 那样进程直接崩溃，或者 `_busy` 永远卡在 true、全页按钮禁用。
+            runCatching {
+                provisionInto(id, huaweiVariant, includeOptional)
+                _toast.value =
+                    if (_provisionReport.value?.success == true) "谷歌环境就绪"
+                    else "环境不完整，请查看自检"
+            }.onFailure { _toast.value = "装配失败：${it.message}" }
             _busy.value = false
         }
     }
@@ -804,8 +859,7 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun isProvisioned(spaceId: String): Boolean =
-        runCatching { DoobleContainer.selfCheck.isProvisioned(spaceId) }.getOrDefault(false)
+    fun isProvisioned(spaceId: String): Boolean = _provisioned.value[spaceId] ?: false
 
     // ------------------------------------------------------------- 签名伪造
 

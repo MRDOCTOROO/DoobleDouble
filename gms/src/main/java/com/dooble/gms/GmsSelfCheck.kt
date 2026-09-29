@@ -250,7 +250,9 @@ class GmsSelfCheck(
         )
         items += CheckItem(
             "运行时权限", "账号读取（GET_ACCOUNTS）",
-            if (hasPermission("android.permission.GET_ACCOUNTS")) CheckStatus.WARN else CheckStatus.WARN,
+            // 有权限 → PASS。之前两个分支都写成 WARN 的笔误会让这一项永远 50 分、
+            // 拉低整体评分，还把"权限正常"这个信号永远藏住了。
+            if (hasPermission("android.permission.GET_ACCOUNTS")) CheckStatus.PASS else CheckStatus.WARN,
             "Android 8 起 GET_ACCOUNTS 不再需要用户授权，但部分老应用仍会查询。",
         )
 

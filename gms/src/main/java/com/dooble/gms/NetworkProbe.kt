@@ -3,6 +3,7 @@ package com.dooble.gms
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -103,7 +104,11 @@ object NetworkProbe {
     private val GOOGLE_IP_PREFIXES = listOf(
         "142.250.", "172.217.", "216.58.", "74.125.", "108.177.",
         "64.233.", "173.194.", "209.85.", "66.102.", "216.239.",
-        "142.251.", "172.253.", "74.6.", "8.8.",
+        "142.251.", "172.253.",
+        // Google Public DNS 只占 8.8.8.0/24 与 8.8.4.0/24。整个 8.8.0.0/16 是
+        // Lumen 的（8.8.1.1 等），写 "8.8." 会把别人家的段判成 Google。
+        // （"74.6." 曾在这里——那是 Yahoo 的 74.6.0.0/16，已删。）
+        "8.8.8.", "8.8.4.",
     )
 
     /**
@@ -118,6 +123,31 @@ object NetworkProbe {
     fun looksLikeGoogleIp(ip: String): Boolean =
         GOOGLE_IP_PREFIXES.any { ip.startsWith(it) }
 
+    /**
+     * 代理软件 fake-ip 模式使用的基准测试段（198.18.0.0/15）。
+     *
+     * 解析落在这里说明 DNS 已被代理接管，所有探测都经代理转发——
+     * **不是**污染。不单独处理的话，正常工作的代理环境会被误报
+     * "DNS 污染"，而同一句话里又写着"可以正常登录"，自相矛盾。
+     */
+    internal fun isFakeIp(ip: String): Boolean =
+        ip.startsWith("198.18.") || ip.startsWith("198.19.")
+
+    /**
+     * "要不要提示 DNS 可疑"的统一判定。**纯函数，可单测。**
+     *
+     * 三类情况一律判 false（不提示）：
+     *  - 解析失败（null）——detail 里已有专门分支，再叠加"可疑"是噪音；
+     *  - IPv6——上面的前缀表全是 IPv4，对 IPv6 一律"不知道"；
+     *  - fake-ip 保留段——那是代理接管了解析，属正常现象。
+     */
+    internal fun dnsLooksPoisoned(resolvedIp: String?): Boolean = when {
+        resolvedIp == null -> false
+        resolvedIp.contains(':') -> false
+        isFakeIp(resolvedIp) -> false
+        else -> !looksLikeGoogleIp(resolvedIp)
+    }
+
     suspend fun run(timeoutMs: Int = 6000): Result = withContext(Dispatchers.IO) {
         // 三个探测**并发**跑。串行的话最坏要 3×timeout（18s），
         // 而自检面板是在用户"感觉坏了"的时候打开的，等 18 秒等于劝退。
@@ -129,10 +159,13 @@ object NetworkProbe {
         val domestic = domesticDeferred.await()
         val google = googleDeferred.await()
         val checkin = checkinDeferred.await()
-        val ip = ipDeferred.await()
+        // DNS 解析没有内建超时：系统 resolver 在丢包环境会重试到几十秒，
+        // 而 DNS 故障恰恰是自检最需要快速给结论的场景。给 await 加两倍预算的
+        // 兜底，超时按"解析失败"处理（后台那个解析协程让它自生自灭，不阻塞面板）。
+        val ip = withTimeoutOrNull(timeoutMs * 2L) { ipDeferred.await() }
 
         val verdict = decideVerdict(domestic.code, google.code, checkin.code)
-        val poisoned = ip != null && !looksLikeGoogleIp(ip)
+        val poisoned = dnsLooksPoisoned(ip)
 
         Result(
             verdict = verdict,
@@ -155,11 +188,15 @@ object NetworkProbe {
      * 关于 checkin 的判据：**看有没有 HTTP 响应（code != 0），不看状态码**。
      * 对 `/checkin` 发 GET 本来就该返回 4xx，用 200..399 判会把
      * "能连上但方法不对"误判成"连不上"。
+     *
+     * 关于 google 的判据：**必须精确 204**。`generate_204` 返回 200/302 时，
+     * 响应几乎总是 captive portal（强制门户）伪造的——把它当"通"会让用户
+     * 在机场 WiFi 上看到自检全绿却永远登录不了。
      */
     internal fun decideVerdict(domesticCode: Int, googleCode: Int, checkinCode: Int): Verdict = when {
         domesticCode !in 200..399 -> Verdict.NO_NETWORK
-        googleCode in 200..399 && checkinCode != 0 -> Verdict.OK
-        googleCode in 200..399 -> Verdict.CHECKIN_BLOCKED
+        googleCode == 204 && checkinCode != 0 -> Verdict.OK
+        googleCode == 204 -> Verdict.CHECKIN_BLOCKED
         else -> Verdict.GOOGLE_BLOCKED
     }
 
@@ -181,7 +218,12 @@ object NetworkProbe {
         poisoned: Boolean,
     ): String {
         val dnsLine = when {
-            resolvedIp == null -> "www.gstatic.com 解析失败（DNS 完全不可用）。"
+            resolvedIp == null -> "www.gstatic.com 解析失败或超时（DNS 不可用）。"
+            isFakeIp(resolvedIp) ->
+                "www.gstatic.com → $resolvedIp（代理 fake-ip 保留段，" +
+                    "说明解析已被代理接管，属正常现象）。"
+            resolvedIp.contains(':') ->
+                "www.gstatic.com → $resolvedIp（IPv6 地址，本探测不对 IPv6 做污染判断）。"
             poisoned ->
                 "⚠️ DNS 可疑：www.gstatic.com 被解析到 **$resolvedIp**，" +
                     "这不是 Google 常见的地址段 —— 典型的 **DNS 污染**。"
@@ -209,6 +251,15 @@ object NetworkProbe {
             Verdict.GOOGLE_BLOCKED ->
                 "国内站点可达（$DOMESTIC → ${domestic.code}），但 Google 不可达" +
                     "（$GOOGLE → ${google.code}${google.error?.let { "，$it" } ?: ""}）。\n" +
+                    // 2xx/3xx 却被判"不可达"，唯一解释是门户劫持：generate_204 正常
+                    // 必须回 204，回 200/302 说明响应被中间设备伪造了
+                    if (google.code in 200..399) {
+                        "⚠️ $GOOGLE 返回了 ${google.code} 而不是 204 —— 这个响应多半来自 " +
+                            "**captive portal（强制门户）**：机场/酒店 WiFi 的认证页或运营商劫持，" +
+                            "并非真的连上了 Google。先完成门户认证或换网络。\n"
+                    } else {
+                        ""
+                    } +
                     dnsLine + "\n" +
                     "说明**代理/加速没有生效**。排查顺序：" +
                     "① 代理软件里换一个节点，或看节点延迟是不是全红；" +

@@ -6,8 +6,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
 
 enum class ProvisionPhase { RESOLVE, DOWNLOAD, VERIFY, INSTALL, CONFIGURE, DONE, ERROR }
 
@@ -200,9 +198,9 @@ class GmsProvisioner(
 
     /**
      * 三级回退拿到 APK：
-     *  1. `assets/microg/<assetName>`（离线内置）
-     *  2. `cacheDir/<assetName>`（上次下载的）
-     *  3. 远端下载（多镜像回退）
+     *  1. `cacheDir/<assetName>`（上次下载的 / 用户手动导入的，**有效才命中**）
+     *  2. `assets/microg/<assetName>`（离线内置）
+     *  3. 远端下载（多镜像回退 + SHA-256 校验 + 断点续传）
      */
     suspend fun resolveApk(
         component: MicroGComponent,
@@ -211,27 +209,35 @@ class GmsProvisioner(
         onProgress: (Long, Long) -> Unit = { _, _ -> },
     ): File? {
         cacheDir.mkdirs()
+        val cached = File(cacheDir, component.assetName)
 
-        // 1) 内置资产
-        val assetPath = "microg/${component.assetName}"
-        val fromAsset = runCatching {
-            context.assets.open(assetPath).use { input ->
-                val out = File(cacheDir, component.assetName)
-                FileOutputStream(out).use { input.copyTo(it) }
-                out
+        // 1) 本地缓存。放在内置资产**前面**是修过的两个坑：
+        //    a) 原来每次装配都无条件把 ~100MB 内置资产全量拷一遍，缓存命中形同虚设；
+        //    b) 用户经 [importComponentApk] 导入的新版本会被内置旧版悄悄覆盖。
+        //    代价：应用内置了更新的资产时缓存会挡住它——「清理 microG 缓存」按钮
+        //    就是给这种场景留的出口。
+        if (cached.isFile && cached.length() > 0 && looksLikeApk(cached)) return cached
+
+        // 2) 内置资产。拷到临时名再换名：copyTo 中途异常不能把残缺文件留在缓存里
+        //    （那会让下次命中一个坏 APK）。
+        runCatching {
+            context.assets.open("microg/${component.assetName}").use { input ->
+                val tmp = File(cacheDir, component.assetName + ".asset.tmp")
+                FileOutputStream(tmp).use { input.copyTo(it) }
+                if (!tmp.renameTo(cached)) tmp.copyTo(cached, overwrite = true)
+                tmp.delete()
             }
         }.getOrNull()
-        if (fromAsset != null && fromAsset.length() > 0) return fromAsset
+        if (cached.isFile && cached.length() > 0 && looksLikeApk(cached)) return cached
 
-        // 2) 本地缓存（含用户手动导入的）
-        val cached = File(cacheDir, component.assetName)
-        if (cached.exists() && cached.length() > 0 && looksLikeApk(cached)) return cached
-
-        // 3) 远端
+        // 3) 远端。GitHub release 自带 digest（sha256:...）；镜像（ghfast.top 等）
+        //    是第三方代理、TLS 在代理侧终结，字节可被替换——校验不过的文件
+        //    绝不能以系统应用身份进容器，那是用户输入 Google 账号密码的组件。
         val urls = MicroGRepository.candidates(component, huawei, release)
         if (urls.isEmpty()) return null
+        val expectedSha256 = MicroGRepository.expectedDigest(component, huawei, release)
         for (url in urls) {
-            val ok = runCatching { download(url, cached, onProgress) }.getOrDefault(false)
+            val ok = runCatching { download(url, cached, onProgress, expectedSha256) }.getOrDefault(false)
             if (ok && looksLikeApk(cached)) return cached
         }
         return null
@@ -255,52 +261,19 @@ class GmsProvisioner(
             }.getOrNull()
         }
 
-    private fun download(url: String, dest: File, onProgress: (Long, Long) -> Unit): Boolean {
-        val tmp = File(dest.parentFile, dest.name + ".part")
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 15_000
-            readTimeout = 30_000
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", "DoobleDouble/1.0 (Android)")
-        }
-        try {
-            if (conn.responseCode !in 200..299) return false
-            val len = conn.contentLengthLong
-            conn.inputStream.use { input ->
-                FileOutputStream(tmp).use { out ->
-                    val buf = ByteArray(128 * 1024)
-                    var done = 0L
-                    var last = 0L
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n <= 0) break
-                        out.write(buf, 0, n)
-                        done += n
-                        if (done - last > 1_000_000) {
-                            last = done
-                            onProgress(done, len)
-                        }
-                    }
-                    onProgress(done, len)
-                }
-            }
-            tmp.renameTo(dest)
-            return dest.exists()
-        } finally {
-            conn.disconnect()
-            if (tmp.exists() && !dest.exists()) tmp.delete()
-        }
-    }
-
-    /** 极简 APK 合法性校验：ZIP 魔数 PK\x03\x04 + 内含 AndroidManifest.xml */
-    private fun looksLikeApk(file: File): Boolean {
-        if (!file.exists() || file.length() < 1024) return false
-        return runCatching {
-            java.util.zip.ZipFile(file).use { zip ->
-                zip.getEntry("AndroidManifest.xml") != null
-            }
-        }.getOrDefault(false)
-    }
+    private fun download(
+        url: String,
+        dest: File,
+        onProgress: (Long, Long) -> Unit,
+        expectedSha256: String?,
+    ): Boolean = ApkHttp.download(
+        url = url,
+        dest = dest,
+        connectTimeoutMs = 15_000,
+        readTimeoutMs = 30_000,
+        expectedSha256 = expectedSha256,
+        onProgress = onProgress,
+    )
 
     private fun human(bytes: Long): String = when {
         bytes <= 0 -> "--"

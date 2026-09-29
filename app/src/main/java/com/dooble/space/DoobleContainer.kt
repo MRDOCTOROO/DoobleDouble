@@ -164,4 +164,20 @@ object DoobleContainer {
             }
         }
     }
+
+    /**
+     * 引擎启动失败后的重试。
+     *
+     * 失败页上那个"重试"按钮不能是空实现——boot 走到 Failed 后没有任何
+     * 路径能回到 Booting/Ready，用户唯一的自救是强杀进程。
+     *
+     * 只从 Failed 状态出发；第一段 `bootstrapHost` 已在 attachBaseContext 完成、
+     * 无法重来，所以引擎实例照旧复用（它的 initialize 可以再跑一次）。
+     */
+    fun retryBootstrap(app: Application) {
+        if (_boot.value !is BootState.Failed) return
+        booted = false
+        _boot.value = BootState.Booting
+        bootstrap(app)
+    }
 }

@@ -72,6 +72,23 @@ class NetworkProbeTest {
     }
 
     @Test
+    fun `8_8 整段不是 Google 的 只有 8_8_8 与 8_8_4 是`() {
+        // 8.8.0.0/16 属 Lumen(L3)，Google Public DNS 只占 8.8.8.0/24 与 8.8.4.0/24。
+        // 之前写 "8.8." 会把 8.8.1.1 判成 Google —— 污染应答落在那个段时漏报。
+        assertTrue(NetworkProbe.looksLikeGoogleIp("8.8.8.8"))
+        assertTrue(NetworkProbe.looksLikeGoogleIp("8.8.4.4"))
+        assertFalse(NetworkProbe.looksLikeGoogleIp("8.8.1.1"))
+        assertFalse(NetworkProbe.looksLikeGoogleIp("8.8.255.255"))
+    }
+
+    @Test
+    fun `74_6 是 Yahoo 的段 不是 Google 的`() {
+        // "74.6." 曾被写在 Google 前缀表里——74.6.0.0/16 是 Yahoo 的，
+        // 污染应答落在那里会被漏报，把用户引向"查代理"而不是"查 DNS"。
+        assertFalse(NetworkProbe.looksLikeGoogleIp("74.6.36.58"))
+    }
+
+    @Test
     fun `IPv6 一律判为不像`() {
         // 真机上 curl 曾经尝试连 [2001::1]:443 —— 那是个明显的假地址。
         // 这里不试图识别 Google 的 IPv6 段（段太多、变化太快），
@@ -142,6 +159,51 @@ class NetworkProbeTest {
             NetworkProbe.Verdict.NO_NETWORK,
             NetworkProbe.decideVerdict(domesticCode = 0, googleCode = 204, checkinCode = 405),
         )
+    }
+
+    @Test
+    fun `generate_204 返回 200 不是通 是 captive portal`() {
+        // generate_204 正常必须精确回 204。返回 200 几乎总是强制门户/运营商
+        // 劫持伪造的响应 —— 判成 OK 会让用户在机场 WiFi 上看到"网络没问题"
+        // 却永远登录不了。
+        assertEquals(
+            NetworkProbe.Verdict.GOOGLE_BLOCKED,
+            NetworkProbe.decideVerdict(domesticCode = 200, googleCode = 200, checkinCode = 405),
+        )
+        assertEquals(
+            NetworkProbe.Verdict.GOOGLE_BLOCKED,
+            NetworkProbe.decideVerdict(domesticCode = 200, googleCode = 302, checkinCode = 0),
+        )
+    }
+
+    // ------------------------------------------------------------------ DNS 可疑判定
+
+    @Test
+    fun `dnsLooksPoisoned 对解析失败不提示`() {
+        // detail 里已有"解析失败"分支，再叠加"可疑"是噪音
+        assertFalse(NetworkProbe.dnsLooksPoisoned(null))
+    }
+
+    @Test
+    fun `dnsLooksPoisoned 对 fake-ip 段不提示`() {
+        // 代理 fake-ip 模式返回 198.18.x.x：解析已被代理接管，属正常现象。
+        // 之前这里会误报"DNS 污染"，和同一句话里的"可以正常登录"自相矛盾。
+        assertFalse(NetworkProbe.dnsLooksPoisoned("198.18.0.1"))
+        assertFalse(NetworkProbe.dnsLooksPoisoned("198.19.255.254"))
+    }
+
+    @Test
+    fun `dnsLooksPoisoned 对 IPv6 不提示`() {
+        // 前缀表全是 IPv4，对 IPv6 只能说"不知道"，不能说"可疑"
+        assertFalse(NetworkProbe.dnsLooksPoisoned("2001::1"))
+        assertFalse(NetworkProbe.dnsLooksPoisoned("2400:cb00::1"))
+    }
+
+    @Test
+    fun `dnsLooksPoisoned 对真机污染地址仍然提示`() {
+        // 守住原本的用途：Facebook 段的解析结果要如实告警
+        assertTrue(NetworkProbe.dnsLooksPoisoned("69.171.235.22"))
+        assertFalse(NetworkProbe.dnsLooksPoisoned("142.250.69.174"))
     }
 
     @Test

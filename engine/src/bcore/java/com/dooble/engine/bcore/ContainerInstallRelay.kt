@@ -91,12 +91,11 @@ object ContainerInstallRelay {
                 )
 
                 // 装完把临时 APK 删掉，避免空间数据里堆垃圾。
-                // 只删我们确定是自己缓存目录下的文件，绝不动用户的其他数据。
+                // 只删容器缓存目录（/cache/）里的副本——之前还按 contains("/download")
+                // 猜：用户把 APK 放在 /sdcard/Download 里让应用发起安装时，
+                // 那份**原始文件**也命中子串，删掉就是删用户数据。
                 runCatching {
-                    val path = file.absolutePath
-                    if (path.contains("/cache/") || path.contains("/download")) {
-                        file.delete()
-                    }
+                    if (file.absolutePath.contains("/cache/")) file.delete()
                 }
             }
         }, "dooble-container-install").apply {
