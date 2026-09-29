@@ -71,6 +71,13 @@ class BcoreEngine private constructor() : VirtualEngine {
         supportsMultiInstance = true,
         nativeHook = true,
         supports64Bit = true,
+        // 如实回答 false：Bcore 上游没有改写 android.os.Build 的注入点，
+        // 我们也没打这个补丁。DeviceProfileSpoofer 写出的 JSON 目前**没有任何消费方**，
+        // 所以容器对外呈现的仍是真机指纹。
+        // 要做成 true，需要在容器侧新增一个补丁：虚拟进程 fork 后、
+        // Application.onCreate 之前，按空间配置改写 Build 的静态字段
+        // （或拦 SystemProperties.get("ro.product.*")）。
+        supportsDeviceSpoof = false,
     )
 
     private lateinit var store: SpaceStore
