@@ -47,8 +47,20 @@ object NetworkProbe {
     private const val CHECKIN = "https://android.clients.google.com/checkin"
 
     enum class Verdict {
-        /** 国内外都通 —— 网络没问题 */
+        /** 国内外都通，且 microG 要用的 checkin 端点也通 —— 网络没问题 */
         OK,
+
+        /**
+         * Google 的通用端点通，但 **microG 登录要用的 checkin 端点不通**。
+         *
+         * 这是最容易被误判成"网络没问题"的一种情况，必须单独一档：
+         * 浏览器能开 google.com，但 microG 登录就是卡在「请稍候」——
+         * 因为代理规则把 `android.clients.google.com` 走了直连（或漏了这条）。
+         *
+         * 实测踩到过：`www.gstatic.com/generate_204` → 204，
+         * 同一个网络下 `android.clients.google.com/checkin` → 连不上。
+         */
+        CHECKIN_BLOCKED,
 
         /** 国内通、Google 不通 —— 代理没生效，或被墙 */
         GOOGLE_BLOCKED,
@@ -68,7 +80,13 @@ object NetworkProbe {
         val dnsLooksPoisoned: Boolean,
         val detail: String,
     ) {
-        /** 能否直接用于 microG 登录 */
+        /**
+         * 能否直接用于 microG 登录。
+         *
+         * 判据是 [Verdict.OK] —— 也就是**必须包含 checkin 端点可达**。
+         * 只看到"Google 能连"就放行会漏掉 [Verdict.CHECKIN_BLOCKED] 这一档，
+         * 而那一档的表现正是"浏览器能开 google.com，microG 却登录不了"。
+         */
         val loginReady: Boolean get() = verdict == Verdict.OK
     }
 
@@ -113,11 +131,7 @@ object NetworkProbe {
         val checkin = checkinDeferred.await()
         val ip = ipDeferred.await()
 
-        val verdict = when {
-            google.code in 200..399 -> Verdict.OK
-            domestic.code in 200..399 -> Verdict.GOOGLE_BLOCKED
-            else -> Verdict.NO_NETWORK
-        }
+        val verdict = decideVerdict(domestic.code, google.code, checkin.code)
         val poisoned = ip != null && !looksLikeGoogleIp(ip)
 
         Result(
@@ -127,8 +141,26 @@ object NetworkProbe {
             checkinCode = checkin.code,
             resolvedIp = ip,
             dnsLooksPoisoned = poisoned,
-            detail = buildDetail(verdict, domestic, google, ip, poisoned),
+            detail = buildDetail(verdict, domestic, google, checkin, ip, poisoned),
         )
+    }
+
+    /**
+     * 由三个探测结果得出结论。**纯函数，可单测。**
+     *
+     * 抽出来是因为这里出过一次**真 bug**：原来只按"Google 通用端点通不通"判定，
+     * 于是"gstatic 通、checkin 不通"会被判成 OK —— 而那种情况下 microG
+     * 登录**一定失败**。用户会看到自检全绿却登录不了，比不报还糟。
+     *
+     * 关于 checkin 的判据：**看有没有 HTTP 响应（code != 0），不看状态码**。
+     * 对 `/checkin` 发 GET 本来就该返回 4xx，用 200..399 判会把
+     * "能连上但方法不对"误判成"连不上"。
+     */
+    internal fun decideVerdict(domesticCode: Int, googleCode: Int, checkinCode: Int): Verdict = when {
+        domesticCode !in 200..399 -> Verdict.NO_NETWORK
+        googleCode in 200..399 && checkinCode != 0 -> Verdict.OK
+        googleCode in 200..399 -> Verdict.CHECKIN_BLOCKED
+        else -> Verdict.GOOGLE_BLOCKED
     }
 
     /**
@@ -144,6 +176,7 @@ object NetworkProbe {
         verdict: Verdict,
         domestic: Probe,
         google: Probe,
+        checkin: Probe,
         resolvedIp: String?,
         poisoned: Boolean,
     ): String {
@@ -157,7 +190,21 @@ object NetworkProbe {
 
         return when (verdict) {
             Verdict.OK ->
-                "国内外站点都可达。$dnsLine 可以正常登录 Google 账号。"
+                "国内外站点都可达，microG 登录要用的 checkin 端点也通。" +
+                    "可以正常登录 Google 账号。$dnsLine"
+
+            Verdict.CHECKIN_BLOCKED ->
+                "**Google 能连，但 microG 登录要用的端点连不上** —— 这正是" +
+                    "「浏览器能打开 google.com，microG 却卡在请稍候」的原因。\n" +
+                    "$GOOGLE → ${google.code}（通）\n" +
+                    "$CHECKIN → 连不上${checkin.error?.let { "（$it）" } ?: ""}\n" +
+                    dnsLine + "\n" +
+                    "代理的规则大概率**只覆盖了 google.com / gstatic.com，漏了 " +
+                    "android.clients.google.com**。修法（按优先级）：\n" +
+                    "① 在代理规则里加一条 `DOMAIN,android.clients.google.com,PROXY`；" +
+                    "② 把兜底/最终规则从 DIRECT 改成 PROXY；" +
+                    "③ 如果是分应用代理，确认本应用在名单里；" +
+                    "④ 换成「全局模式」试一次 —— 如果全局能登录，就说明是规则漏了这条域名。"
 
             Verdict.GOOGLE_BLOCKED ->
                 "国内站点可达（$DOMESTIC → ${domestic.code}），但 Google 不可达" +
