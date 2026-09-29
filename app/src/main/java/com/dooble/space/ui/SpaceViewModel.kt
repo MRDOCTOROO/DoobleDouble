@@ -656,6 +656,10 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val result = ShortcutPublisher.pinApp(getApplication(), id, app)
             _pinningPackage.value = null
+            android.util.Log.i(
+                "DoobleShortcut",
+                "pinApp(${app.packageName}) -> ${result::class.simpleName} $result",
+            )
             _toast.value = when (result) {
                 is ShortcutPublisher.Result.Pinned ->
                     "已在桌面创建「${result.label}」。若没出现，请在系统确认框上点允许。"
