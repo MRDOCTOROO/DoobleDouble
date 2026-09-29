@@ -57,21 +57,47 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # 不用 android-actions/setup-android：它会去装 Google 早已下架的
+      # legacy "tools" 包，直接 exit 1（实测：Warning: Failed to find package
+      # 'tools' → sdkmanager 失败）。ubuntu-latest 镜像**本来就带完整 Android SDK**
+      # （含 cmdline-tools），直接用即可。
+      - name: Locate Android SDK
+        run: |
+          set -e
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "$SDK" ]; then
+            echo "::error:: 找不到 Android SDK（试过 $SDK）"
+            exit 1
+          fi
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          # cmdline-tools 不在 PATH 上时补进去（镜像版本之间会有差异）
+          if ! command -v sdkmanager >/dev/null 2>&1; then
+            echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          fi
+          echo "SDK = $SDK"
+          ls "$SDK"
 
-      # 显式装齐本工程需要的三样：platform 35 / build-tools 35 / NDK / CMake。
-      # 不装的话 AGP 会在构建中途报 "NDK not configured" 或自动去下，
-      # 后者更糟 —— 它可能下成别的版本，然后报一堆看不懂的 native 错误。
+      # 显式装齐本工程需要的四样：platform 35 / build-tools 35 / NDK / CMake。
+      # 不装的话 AGP 会在构建中途报 "NDK not configured"，或者自己下一个别的版本
+      # 然后抛一堆看不懂的 native 错误 —— 后者更难查。
       - name: Install SDK components
         run: |
-          sdkmanager --install \
+          set -e
+          SDK="$ANDROID_SDK_ROOT"
+          # 镜像里 SDK 属主通常是 runner 用户；不是的话退回 sudo。
+          if [ -w "$SDK" ]; then SUDO=""; else SUDO="sudo"; fi
+          # 许可证在镜像里一般已接受，但 sdkmanager 偶尔仍会卡在交互提示上
+          yes | $SUDO sdkmanager --licenses > /dev/null 2>&1 || true
+          $SUDO sdkmanager --install \
             "platforms;android-35" \
             "build-tools;35.0.0" \
             "ndk;${NDK_VERSION}" \
-            "cmake;${CMAKE_VERSION}" > /dev/null
-          echo "已安装："
-          ls "$ANDROID_SDK_ROOT/ndk"
+            "cmake;${CMAKE_VERSION}"
+          echo "--- 已安装的 NDK ---"
+          ls "$SDK/ndk"
+          echo "--- CMake ---"
+          ls "$SDK/cmake"
 
       - name: Cache Gradle
         uses: actions/cache@v4
