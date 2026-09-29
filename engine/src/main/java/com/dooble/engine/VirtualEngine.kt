@@ -169,6 +169,23 @@ data class EngineCapability(
     val nativeHook: Boolean,
     /** 是否支持 64 位虚拟应用 */
     val supports64Bit: Boolean,
+    /**
+     * 能否让容器内的应用看到**被伪装过的** `android.os.Build`。
+     *
+     * ## 为什么单独一个开关，而不是"配了就当作生效"
+     *
+     * 设备指纹（brand/model/device/fingerprint/sdkInt）要生效，必须由**引擎**在
+     * 虚拟进程 fork 之后、`Application.onCreate` 之前改写 `Build` 的静态字段
+     * 或 `ro.product.*` 系统属性。宿主侧写一个 JSON 文件**本身不产生任何效果** ——
+     * 那只是"意图"，不是"能力"。
+     *
+     * 之前这里没有这个开关，自检于是只能检查"JSON 文件在不在"，结果**永远 PASS**，
+     * 面板上还写着"对外呈现：Google Pixel 8 Pro"—— 而实际上容器对外呈现的是
+     * 真机。用户据此以为设备认证没问题，方向全错。
+     *
+     * 默认 false：没有注入点的引擎如实回答。
+     */
+    val supportsDeviceSpoof: Boolean = false,
 )
 
 data class SpaceRuntime(

@@ -250,10 +250,23 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
                     redirectStorage = redirectStorage,
                 )
                 withContext(Dispatchers.IO) { engine.createSpace(config) }
-                _toast.value = "空间「${config.name}」已创建"
                 refreshSpaces()
                 _currentSpaceId.value = config.id
                 refreshApps()
+
+                // 勾了「启用谷歌环境」就**当场装配**。
+                //
+                // 之前只创建、不装配 —— 那个勾选只是写进了 SpaceConfig.googleEnvironment，
+                // **没有任何地方消费它**。用户以为勾了就有，结果进空间发现 microG 一个都没有，
+                // 必须自己再去点一次「装配谷歌环境」，看起来就像勾选失效。
+                //
+                // 装配要下 100MB+，所以提示语要说清楚在干什么，不能只说"已创建"。
+                if (googleEnvironment) {
+                    _toast.value = "空间已创建，正在装配谷歌环境（首次需下载约 107MB）…"
+                    provisionInto(config.id)
+                } else {
+                    _toast.value = "空间「${config.name}」已创建"
+                }
             }.onFailure { _toast.value = "创建失败：${it.message}" }
             _busy.value = false
         }
@@ -705,30 +718,61 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------- 谷歌环境
 
+    /**
+     * 装配谷歌环境的**核心流程**。
+     *
+     * 抽出来是为了让「创建空间时自动装配」和「用户手动点装配」走**同一条路** ——
+     * 两处各写一份必然走样（自动那份很容易忘了刷新自检、忘了刷新应用列表）。
+     *
+     * 调用方负责 `_busy` 的开关：自动装配时外层已经持有，不要在这里重复置位。
+     */
+    private suspend fun provisionInto(
+        spaceId: String,
+        huaweiVariant: Boolean = false,
+        includeOptional: Boolean = false,
+    ) {
+        _provisionStep.value = null
+        val report = DoobleContainer.provisioner.provision(
+            spaceId = spaceId,
+            huaweiVariant = huaweiVariant,
+            includeOptional = includeOptional,
+        ) { step -> _provisionStep.value = step }
+        _provisionReport.value = report
+        refreshApps()
+        refreshSpaces()
+        // 装配完立刻自检：签名伪造/设备指纹这两步是否真的落地，只有自检能回答。
+        // 静默跑，结果展示在自检面板里，不弹 toast 打扰。
+        runSelfCheckFor(spaceId, silent = true)
+    }
+
     fun provisionGoogleEnvironment(huaweiVariant: Boolean = false, includeOptional: Boolean = false) {
         val id = _currentSpaceId.value ?: return
         viewModelScope.launch {
             _busy.value = true
-            _provisionStep.value = null
-            val report = DoobleContainer.provisioner.provision(
-                spaceId = id,
-                huaweiVariant = huaweiVariant,
-                includeOptional = includeOptional,
-            ) { step -> _provisionStep.value = step }
-            _provisionReport.value = report
-            _toast.value = if (report.success) "谷歌环境就绪" else "环境不完整，请查看自检"
-            refreshApps()
-            refreshSpaces()
-            runSelfCheck(silent = true)
+            provisionInto(id, huaweiVariant, includeOptional)
+            _toast.value =
+                if (_provisionReport.value?.success == true) "谷歌环境就绪"
+                else "环境不完整，请查看自检"
             _busy.value = false
         }
     }
 
     fun runSelfCheck(silent: Boolean = false) {
         val id = _currentSpaceId.value ?: return
+        runSelfCheckFor(id, silent)
+    }
+
+    /**
+     * 对**指定空间**跑自检。
+     *
+     * 与 [runSelfCheck] 的区别：那个读 `_currentSpaceId`，在"创建空间后立刻装配"
+     * 这条路径上时序不保证（`_currentSpaceId` 刚被赋值，但 UI 可能还没切过去）。
+     * 显式传 spaceId 更稳。
+     */
+    private fun runSelfCheckFor(spaceId: String, silent: Boolean = false) {
         viewModelScope.launch {
             runCatching {
-                val r = withContext(Dispatchers.IO) { DoobleContainer.selfCheck.run(id) }
+                val r = withContext(Dispatchers.IO) { DoobleContainer.selfCheck.run(spaceId) }
                 _report.value = r
                 if (!silent && r.overall == com.dooble.gms.CheckStatus.PASS) {
                     _toast.value = "自检全部通过"

@@ -77,7 +77,7 @@ object GoogleStack {
      */
     val PLAY_STORE_REQUIREMENTS: List<String> = listOf(
         "签名伪造切到 OFFICIAL，且自备 Google 官方证书（本工程不附带）",
-        "设备指纹伪装开启（空间配置里默认已开）",
+        "设备指纹伪装**真正生效** —— 注意：本工程只写出了配置，容器侧的 Build 改写尚未实现，这一条目前**不满足**",
         "电源优化白名单放行（否则 Android 16 上后台下载服务会被冻结）",
         "Google 服务端的设备认证 —— 这一步在免 root 容器里拿不到硬件凭据，过不了",
     )

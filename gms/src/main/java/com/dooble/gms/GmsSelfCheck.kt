@@ -58,7 +58,50 @@ class GmsSelfCheck(
     private val spoof = GmsSignatureSpoof(context, engine)
     private val provisioner = GmsProvisioner(context, engine)
 
-    fun run(spaceId: String): SelfCheckReport {
+    /**
+     * 跑一次完整自检。
+     *
+     * `suspend`：最后一步要**真的发一次网络请求**（见 [NetworkProbe]）。
+     * 这是刻意的 —— 用户点开自检的场景，十有八九是"登录失败"，
+     * 而登录失败最常见的原因就是代理没生效。只检查本地配置的"自检"
+     * 在这种场景下毫无价值。
+     */
+    suspend fun run(spaceId: String): SelfCheckReport {
+        val items = collectLocalItems(spaceId)
+
+        // ---- 组 7：网络 ----
+        //
+        // 放在最后是有意的：它是唯一一个**会真的发网络请求**的检查项（最多 6 秒），
+        // 前面的本地检查要先把结果给出来，用户不用干等。
+        //
+        // 为什么必须有这一项：microG 登录第一步是 checkin（连
+        // android.clients.google.com）。这一步失败时 microG 只弹一句
+        // 「与 Google 服务器通信时发生问题」，用户完全无从判断是自己的网络
+        // 还是容器坏了 —— 实测中真的有人因此一路怀疑到容器实现上。
+        val net = NetworkProbe.run()
+        items += CheckItem(
+            "网络", "能否连上 Google",
+            when (net.verdict) {
+                NetworkProbe.Verdict.OK -> CheckStatus.PASS
+                // 两种情况都算 FAIL：用户要的是"能不能登录"，不是"哪一层坏了"。
+                // 区别写在 detail 里。
+                NetworkProbe.Verdict.GOOGLE_BLOCKED,
+                NetworkProbe.Verdict.NO_NETWORK,
+                -> CheckStatus.FAIL
+            },
+            net.detail,
+        )
+
+        return SelfCheckReport(spaceId, items)
+    }
+
+    /**
+     * 只做**本地**检查（不联网）。
+     *
+     * 单独抽出来给 [canAttemptSignIn] 用：那个函数是在 UI 里同步调用的，
+     * 不能因为"要不要禁用登录按钮"就每次都发一次网络请求。
+     */
+    private fun collectLocalItems(spaceId: String): MutableList<CheckItem> {
         val items = mutableListOf<CheckItem>()
 
         // ---- 组 1：容器能力 ----
@@ -170,13 +213,32 @@ class GmsSelfCheck(
         }
 
         // ---- 组 4：设备指纹 ----
+        //
+        // ⚠️ 这里**不能**只看"配置文件在不在"。
+        // DeviceProfileSpoofer 只是把意图写成一个 JSON；要让它真的生效，
+        // 必须由引擎在虚拟进程里改写 Build 的静态字段。之前没有能力开关，
+        // 于是这条检查永远 PASS、面板上还写着"对外呈现：Pixel 8 Pro" ——
+        // 而容器实际对外呈现的是真机。用户据此以为设备认证没问题，排查方向全错。
+        //
+        // 现在的判据：**引擎是否声明支持**（capability.supportsDeviceSpoof），
+        // 配置内容只作为附注展示。
         val profile = DeviceProfileSpoofer(context, engine).profileOf(spaceId)
+        val spoofSupported = engine.capability.supportsDeviceSpoof
+        val configuredText = profile?.let {
+            "已配置：${it.profile.manufacturer} ${it.profile.model}（${it.profile.device}），sdk=${it.profile.sdkInt}"
+        } ?: "未配置指纹伪装。"
         items += CheckItem(
-            "设备指纹", "指纹伪装已配置",
-            if (profile != null) CheckStatus.PASS else CheckStatus.WARN,
-            profile?.let {
-                "对外呈现：${it.profile.manufacturer} ${it.profile.model}（${it.profile.device}），sdk=${it.profile.sdkInt}"
-            } ?: "未配置指纹伪装。部分 Google 应用会因设备未认证而拒绝登录。",
+            "设备指纹", "指纹伪装生效",
+            if (spoofSupported) CheckStatus.PASS else CheckStatus.WARN,
+            if (spoofSupported) {
+                "$configuredText —— 引擎已支持改写容器内的 Build，容器对外呈现的是上面这套指纹。"
+            } else {
+                "$configuredText 但**当前引擎（${engine.name}）不支持改写容器内的 Build**，" +
+                    "所以这份配置只是一份意图，容器对外呈现的仍是真机指纹。" +
+                    "影响：需要设备认证的 Google 应用会判定为未认证。" +
+                    "不影响的：microG 登录、Aurora Store 下载安装、多开 —— " +
+                    "这条主链路本来就不依赖设备认证。"
+            },
         )
 
         // ---- 组 5：运行时权限 ----
@@ -200,7 +262,7 @@ class GmsSelfCheck(
             else "该空间尚未登录 Google 账号。安装完环境后可在空间详情页发起登录。",
         )
 
-        return SelfCheckReport(spaceId, items)
+        return items
     }
 
     private fun hasPermission(name: String): Boolean =
@@ -214,8 +276,10 @@ class GmsSelfCheck(
      * 签名伪造的本地测试环境会被判定为"不能登录"，而实际上它能正常登录。
      */
     fun canAttemptSignIn(spaceId: String): Boolean {
-        val report = run(spaceId)
-        return report.items.none {
+        // 用**本地**检查，不联网：这个函数是在 UI 里同步调用的，
+        // 只为了决定"登录按钮要不要置灰"，不该每次都发网络请求。
+        val items = collectLocalItems(spaceId)
+        return items.none {
             it.status == CheckStatus.FAIL && it.group in setOf("容器能力", "组件安装")
         }
     }
