@@ -48,6 +48,7 @@ git 的 credential helper（本机 Windows 凭证管理器里存着）。
 
 import argparse
 import base64
+import http.client
 import json
 import os
 import subprocess
@@ -138,8 +139,13 @@ class Gh:
                     time.sleep(2 * (attempt + 1))
                     continue
                 raise SystemExit(f"[ERROR] {method} {url}\n        HTTP {e.code}: {detail[:600]}")
-            except urllib.error.URLError as e:
-                last = str(e)
+            except (urllib.error.URLError, http.client.HTTPException, OSError) as e:
+                # 本机走的是一个会偶发掉连接的代理，实测出现过
+                # `RemoteDisconnected: Remote end closed connection without response`
+                # —— 那是一次**瞬时**故障，重试就好，不该让整次推送白跑。
+                # OSError 覆盖 ConnectionResetError / TimeoutError 等。
+                last = f"{type(e).__name__}: {e}"
+                print(f"    [retry {attempt + 1}/{retries}] {last}")
                 time.sleep(2 * (attempt + 1))
         raise SystemExit(f"[ERROR] {method} {url} 重试 {retries} 次仍失败：{last}")
 
