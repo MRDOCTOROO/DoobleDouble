@@ -53,6 +53,10 @@ object ContainerInstallRelay {
         if (file == null || !file.exists() || file.length() == 0L) return false
         if (userId <= 0) return false
 
+        // 本回调跑在虚拟应用进程，不执行宿主的 Application.onCreate，
+        // 事件日志单例在这里是 null——先兜底初始化，否则事件被静默丢弃。
+        InstallEventLog.ensureInit(BlackBoxCore.getContext().filesDir)
+
         // 先解析包名，用于日志与重复安装提示；解析不出也不阻止安装尝试
         val parsed = runCatching {
             BlackBoxCore.getPackageManager()
@@ -133,6 +137,9 @@ object ContainerInstallRelay {
         message: String?,
     ) {
         if (userId <= 0) return
+
+        // 与 handle 同理：会话式安装的完成回调也跑在虚拟应用进程。
+        InstallEventLog.ensureInit(BlackBoxCore.getContext().filesDir)
 
         // 会话式安装的调用方已经解析过包名，但标签要自己取一次——
         // 事件日志里的 label 是给用户看的，只有包名没有可读性

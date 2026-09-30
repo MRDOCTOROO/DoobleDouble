@@ -1,0 +1,33 @@
+From: Dooble Double <noreply@example.invalid>
+Subject: [PATCH 0010] 容器安装判定：兼容不带 MIME type 的 ACTION_INSTALL_PACKAGE
+
+ComponentUtils.isRequestInstall 原来只认 intent.getType() 等于
+application/vnd.android.package-archive。Aurora 等现代商店走
+PackageInstaller 下载后，发的 INSTALL_PACKAGE 意图只带 content:// 数据
+URI、不带 MIME type（或类型在 Intent 转换时丢失），于是容器把意图
+放行给系统安装器 → 系统安装器里的 installerPackageName 是虚拟包名，
+宿主 PMS 查不到 → "The given installer package name ... is invalid"。
+
+补丁让 ACTION_INSTALL_PACKAGE 也命中安装判定，容器就能接管 Intent 式
+安装请求，把 APK 装进当前空间而不是宿主。
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/utils/ComponentUtils.java b/Bcore/src/main/java/top/niunaijun/blackbox/utils/ComponentUtils.java
+index c821ffe..696d27f 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/utils/ComponentUtils.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/utils/ComponentUtils.java
+@@ -16,7 +16,15 @@ import static android.content.pm.ActivityInfo.LAUNCH_SINGLE_INSTANCE;
+ public class ComponentUtils {
+ 
+     public static boolean isRequestInstall(Intent intent) {
+-        return "application/vnd.android.package-archive".equals(intent.getType());
++        if (intent == null) {
++            return false;
++        }
++        // 老路径：file:// 或显式带 APK MIME 的意图
++        if ("application/vnd.android.package-archive".equals(intent.getType())) {
++            return true;
++        }
++        // 新路径：Aurora / 现代商店下载完成后发的 content:// 安装意图（不带 MIME）
++        return Intent.ACTION_INSTALL_PACKAGE.equals(intent.getAction());
+     }
+ 
+     public static boolean isSelf(Intent intent) {

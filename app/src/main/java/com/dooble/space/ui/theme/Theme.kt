@@ -11,140 +11,188 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
 /**
- * 后现代设计令牌。
+ * Dooble Double 视觉令牌 —— 亚克力 / 毛玻璃 + 莫兰迪。
  *
- * 视觉主张（Postmodern / Neo-Brutalist）：
- *  - **不掩饰结构**：3dp 纯黑描边 + 硬投影，没有圆角、没有渐变、没有柔和阴影。
- *    后现代反对现代主义的"无装饰即是高级"，把装饰和结构重新摆到台面上。
- *  - **高饱和撞色**：酸性黄、电光蓝、荧光粉并置，故意不做和谐过渡。
- *  - **字体混排**：标题用超粗无衬线，标签用等宽字体（monospace），
- *    像系统日志一样裸露技术感。
- *  - **轻微错位**：卡片允许 ±1° 旋转，打破网格的绝对秩序。
+ * 设计语言从上一版的「新粗野主义」整体迁移到：
  *
- * 同时它必须**在浅色主题下可用**：底色是纸白，文字是纯黑，
- * 所有色块都保证 4.5:1 以上对比度。
+ *  - **亚克力玻璃**：半透明白色叠加层 + 柔和高斯阴影 + 1dp 高光描边，
+ *    卡片像一块悬浮在暖灰色画布上的磨砂玻璃。
+ *  - **莫兰迪色板**：低饱和、带灰度的蓝 / 鼠尾草绿 / 雾粉 / 米白 / 灰紫，
+ *    视觉安静，长时间阅读不刺眼。
+ *  - **苹果式排版**：大标题左对齐 + 小字灰色副标题；正文 15sp、
+ *    说明 13sp、脚注 11sp，层级靠字重与字号而非色块表达。
+ *  - **折叠收纳**：所有长内容区块默认可折叠，展开才显示细节，
+ *    首屏保持紧凑。
  */
 
-// ------------------------------------------------------------------ 色板
+// ------------------------------------------------------------------ 画布与文字
 
-val Paper = Color(0xFFF3EFE6)
-val PaperDeep = Color(0xFFE6DFD0)
-val Ink = Color(0xFF111111)
-val InkSoft = Color(0xFF4A4A4A)
-val InkFaint = Color(0xFF8A857A)
+/** 页面底色：暖灰白，接近纸感但不刺眼 */
+val Canvas = Color(0xFFF2F0EB)
+val CanvasDeep = Color(0xFFE7E3DC)
+val Ink = Color(0xFF3E3B36)
+val InkSoft = Color(0xFF6F6A62)
+val InkFaint = Color(0xFFA39D93)
+val Hairline = Color(0x143E3B36)
 
-val Acid = Color(0xFFE8FF3A)
-val Electric = Color(0xFF2B4CFF)
-val HotPink = Color(0xFFFF4D9D)
-val Mint = Color(0xFF9BF6C1)
-val Tangerine = Color(0xFFFF7A3D)
-val Violet = Color(0xFFB48CFF)
-val Sky = Color(0xFF6FD3FF)
-val Danger = Color(0xFFD62B2B)
-val Success = Color(0xFF14875A)
+// ------------------------------------------------------------------ 莫兰迪色板
+
+val MorandiSage = Color(0xFFA3B5A6)
+val MorandiBlue = Color(0xFF91A9B8)
+val MorandiPink = Color(0xFFC7A8AE)
+val MorandiBeige = Color(0xFFC9B79E)
+val MorandiLavender = Color(0xFFAAA2B6)
+val MorandiOlive = Color(0xFFB4AE8F)
+val MorandiSlate = Color(0xFF8E9BA3)
+val MorandiClay = Color(0xFFBE9E93)
+val MorandiMoss = Color(0xFF8FA58F)
+
+val Danger = Color(0xFFBC6F6F)
+val Success = Color(0xFF7C9A80)
+val Warning = Color(0xFFC0A06A)
 
 /** 空间主题色循环。新建空间时按序号取色。 */
-val SpaceAccents = listOf(Electric, HotPink, Tangerine, Mint, Violet, Sky, Acid)
+val SpaceAccents = listOf(
+    MorandiBlue,
+    MorandiSage,
+    MorandiPink,
+    MorandiBeige,
+    MorandiLavender,
+    MorandiClay,
+    MorandiOlive,
+)
 
-fun accentOf(index: Int): Color = SpaceAccents[((index % SpaceAccents.size) + SpaceAccents.size) % SpaceAccents.size]
+fun accentOf(index: Int): Color =
+    SpaceAccents[((index % SpaceAccents.size) + SpaceAccents.size) % SpaceAccents.size]
+
+// ------------------------------------------------------------------ 兼容别名
+// 保留旧命名，防止历史引用在迁移过程中漏改导致编译失败。
+
+val Paper = Canvas
+val PaperDeep = CanvasDeep
+val Acid = MorandiOlive
+val Electric = MorandiBlue
+val HotPink = MorandiPink
+val Mint = MorandiSage
+val Tangerine = MorandiClay
+val Violet = MorandiLavender
+val Sky = MorandiSlate
 
 // ------------------------------------------------------------------ 字体
 
-val Display = FontFamily.SansSerif
-val Mono = FontFamily.Monospace
+private val Display = FontFamily.SansSerif
 
 val DoobleTypography = Typography(
     displayLarge = TextStyle(
         fontFamily = Display,
-        fontWeight = FontWeight.Black,
-        fontSize = 44.sp,
-        lineHeight = 44.sp,
-        letterSpacing = (-1.5).sp,
+        fontWeight = FontWeight.Bold,
+        fontSize = 34.sp,
+        lineHeight = 40.sp,
+        letterSpacing = (-0.5).sp,
     ),
     displayMedium = TextStyle(
         fontFamily = Display,
-        fontWeight = FontWeight.Black,
-        fontSize = 32.sp,
+        fontWeight = FontWeight.Bold,
+        fontSize = 28.sp,
         lineHeight = 34.sp,
-        letterSpacing = (-1).sp,
+        letterSpacing = (-0.3).sp,
+    ),
+    headlineLarge = TextStyle(
+        fontFamily = Display,
+        fontWeight = FontWeight.Bold,
+        fontSize = 26.sp,
+        lineHeight = 32.sp,
     ),
     headlineMedium = TextStyle(
         fontFamily = Display,
-        fontWeight = FontWeight.ExtraBold,
-        fontSize = 24.sp,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 22.sp,
         lineHeight = 28.sp,
+    ),
+    headlineSmall = TextStyle(
+        fontFamily = Display,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 18.sp,
+        lineHeight = 24.sp,
     ),
     titleLarge = TextStyle(
         fontFamily = Display,
-        fontWeight = FontWeight.Bold,
-        fontSize = 19.sp,
-        lineHeight = 24.sp,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 17.sp,
+        lineHeight = 22.sp,
     ),
     titleMedium = TextStyle(
         fontFamily = Display,
-        fontWeight = FontWeight.Bold,
+        fontWeight = FontWeight.SemiBold,
         fontSize = 16.sp,
+        lineHeight = 21.sp,
+    ),
+    titleSmall = TextStyle(
+        fontFamily = Display,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 15.sp,
         lineHeight = 20.sp,
     ),
     bodyLarge = TextStyle(
         fontFamily = Display,
         fontWeight = FontWeight.Normal,
-        fontSize = 15.sp,
-        lineHeight = 22.sp,
+        fontSize = 16.sp,
+        lineHeight = 24.sp,
     ),
     bodyMedium = TextStyle(
         fontFamily = Display,
         fontWeight = FontWeight.Normal,
-        fontSize = 13.5.sp,
-        lineHeight = 19.sp,
+        fontSize = 15.sp,
+        lineHeight = 22.sp,
     ),
     bodySmall = TextStyle(
         fontFamily = Display,
         fontWeight = FontWeight.Normal,
-        fontSize = 12.sp,
-        lineHeight = 17.sp,
+        fontSize = 13.sp,
+        lineHeight = 18.sp,
     ),
     labelLarge = TextStyle(
-        fontFamily = Mono,
-        fontWeight = FontWeight.Bold,
-        fontSize = 12.sp,
-        letterSpacing = 1.sp,
+        fontFamily = Display,
+        fontWeight = FontWeight.Medium,
+        fontSize = 15.sp,
+        lineHeight = 20.sp,
     ),
     labelMedium = TextStyle(
-        fontFamily = Mono,
+        fontFamily = Display,
         fontWeight = FontWeight.Medium,
-        fontSize = 10.5.sp,
-        letterSpacing = 0.8.sp,
+        fontSize = 13.sp,
+        lineHeight = 18.sp,
     ),
     labelSmall = TextStyle(
-        fontFamily = Mono,
+        fontFamily = Display,
         fontWeight = FontWeight.Medium,
-        fontSize = 9.5.sp,
-        letterSpacing = 0.6.sp,
+        fontSize = 11.sp,
+        lineHeight = 15.sp,
+        letterSpacing = 0.3.sp,
     ),
 )
 
 // ------------------------------------------------------------------ 主题
 
 private val DoobleColorScheme = lightColorScheme(
-    primary = Electric,
+    primary = MorandiBlue,
     onPrimary = Color.White,
-    primaryContainer = Acid,
+    primaryContainer = MorandiSage.copy(alpha = 0.35f),
     onPrimaryContainer = Ink,
-    secondary = HotPink,
+    secondary = MorandiPink,
     onSecondary = Ink,
-    secondaryContainer = Mint,
+    secondaryContainer = MorandiLavender.copy(alpha = 0.35f),
     onSecondaryContainer = Ink,
-    tertiary = Tangerine,
+    tertiary = MorandiClay,
     onTertiary = Ink,
-    background = Paper,
+    background = Canvas,
     onBackground = Ink,
-    surface = Paper,
+    surface = Color.White.copy(alpha = 0.6f),
     onSurface = Ink,
-    surfaceVariant = PaperDeep,
+    surfaceVariant = Color.White.copy(alpha = 0.4f),
     onSurfaceVariant = InkSoft,
-    outline = Ink,
-    outlineVariant = InkFaint,
+    outline = InkFaint,
+    outlineVariant = Hairline,
     error = Danger,
     onError = Color.White,
 )

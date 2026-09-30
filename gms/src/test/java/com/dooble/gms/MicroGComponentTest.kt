@@ -39,6 +39,7 @@ class MicroGComponentTest {
             "com.android.vending",
             "com.google.android.gsf",
             "com.google.android.maps",
+            "app.revanced.android.gms",
         )
         MicroGComponent.entries.forEach {
             assertTrue("意外的包名：${it.packageName}", it.packageName in known)
@@ -52,7 +53,11 @@ class MicroGComponentTest {
             assertTrue("${it.shortName} 缺 releaseTag", it.releaseTag.isNotBlank())
             assertTrue("${it.shortName} 缺 remoteName", it.remoteName.isNotBlank())
             assertTrue("${it.shortName} 的直链必须是 .apk", it.remoteName.endsWith(".apk"))
-            assertTrue("${it.shortName} 的 tag 应以 v 开头", it.releaseTag.startsWith("v"))
+            // 官方 microG 的 tag 带 v 前缀；microG RE 的 tag 是纯数字（7.1.1）。
+            assertTrue(
+                "${it.shortName} 的 tag 应以 v 开头或为纯数字",
+                it.releaseTag.startsWith("v") || it.releaseTag.matches(Regex("\\d+(\\.\\d+)*")),
+            )
         }
     }
 

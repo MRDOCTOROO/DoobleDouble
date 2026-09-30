@@ -1,0 +1,48 @@
+From: Dooble Double <noreply@example.invalid>
+Subject: [PATCH 0011] 启动意图优先选择 label 与应用名一致的入口（F-Droid 防偷看伪装）
+
+F-Droid 等应用在 manifest 里把「防偷看」的伪装入口（一个计算器）声明为
+第一个 MAIN/LAUNCHER activity。容器 BPackageManager.getLaunchIntentForPackage
+取 ris.get(0)，于是从桌面点 F-Droid 打开的是计算器伪装界面，而不是真正的
+应用界面（实测：F-Droid 图标点开是计算器，空间里看起来像装了个假应用）。
+
+改为：在解析结果多于一个时，优先选择「activity 解析出来的 label 与应用名
+一致」的入口。真实入口的 label 为空时会回落到应用名；伪装入口带自己的
+label（Calculator），不会误匹配。单入口应用行为不变。
+
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/fake/frameworks/BPackageManager.java b/Bcore/src/main/java/top/niunaijun/blackbox/fake/frameworks/BPackageManager.java
+index bfeaa90..14ad298 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/fake/frameworks/BPackageManager.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/frameworks/BPackageManager.java
+@@ -113,8 +113,29 @@ public class BPackageManager extends BlackManager<IBPackageManagerService> {
+         }
+         Intent intent = new Intent(intentToResolve);
+         intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+-        intent.setClassName(ris.get(0).activityInfo.packageName,
+-                ris.get(0).activityInfo.name);
++        ResolveInfo best = ris.get(0);
++        if (ris.size() > 1) {
++            // 有些应用（如 F-Droid）把「防偷看」的伪装入口（计算器）声明为
++            // 第一个 MAIN/LAUNCHER activity。直接取 ris.get(0) 会打开伪装界面，
++            // 而不是真正的应用。这里优先选「解析出来的 label 与应用名一致」的
++            // 入口：真入口的 label 为空时会回落到应用名，伪装入口有自己的 label。
++            android.content.pm.PackageManager pm = BlackBoxCore.getContext().getPackageManager();
++            try {
++                CharSequence appLabel = ris.get(0).activityInfo.applicationInfo.loadLabel(pm);
++                if (appLabel != null) {
++                    for (ResolveInfo ri : ris) {
++                        CharSequence label = ri.activityInfo.loadLabel(pm);
++                        if (label != null && appLabel.toString().equals(label.toString())) {
++                            best = ri;
++                            break;
++                        }
++                    }
++                }
++            } catch (Throwable ignored) {
++            }
++        }
++        intent.setClassName(best.activityInfo.packageName,
++                best.activityInfo.name);
+         return intent;
+     }
+     

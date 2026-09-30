@@ -1,0 +1,81 @@
+From: Dooble Double <noreply@example.invalid>
+Subject: [PATCH 0009] 会话式安装弃用管道，直接写文件（规避 MuMu 翻译层 EBADF）
+
+PackageInstallerProxy.openWrite 原来用 ParcelFileDescriptor.createPipe()
+中转字节。MuMu 的 ARM 翻译层下，管道读端 read 会抛
+EBADF (Bad file descriptor)，导致 Aurora 会话式安装在写 split 时卡死。
+改为直接返回目标文件的写端描述符，调用方写完 close 再 commit。
+
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/PackageInstallerProxy.java b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/PackageInstallerProxy.java
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/PackageInstallerProxy.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/PackageInstallerProxy.java
+@@ -500,46 +500,35 @@
+         /**
+          * 写入通道。
+          *
+-         * 返回管道的**写端**给调用方，容器自己留读端，在后台线程里把字节
+-         * 拷进会话目录的文件。用管道而不是直接返回文件描述符，是因为调用方
+-         * 只知道"写一个流"，不知道长度——只有拿到 EOF 才知道写完了。
++         * 直接返回目标文件的写端描述符，不再用管道中转。
++         *
++         * 为什么弃用管道：MuMu 翻译层下 {@code ParcelFileDescriptor.createPipe()}
++         * 的读端 read 会抛 {@code EBADF (Bad file descriptor)}，导致会话式安装
++         * 写不进任何字节（实测：Aurora 的 SessionInstaller 下载完成后在写 split
++         * 时抛 EBADF，安装永远停在 INSTALLING）。调用方本来就只负责"写一个流"，
++         * 写完 close 再 commit，所以让文件描述符直接指向会话目录里的目标文件即可，
++         * 无需后台搬运线程。
+          */
+         private static Object openWrite(SessionState state, Object[] args) throws IOException {
+             String name = args != null && args.length > 0 ? (String) args[0] : "base.apk";
+             long offset = args != null && args.length > 1 ? toLong(args[1]) : 0L;
+ 
+             final File target = state.fileFor(name);
+-            final ParcelFileDescriptor[] pipe = ParcelFileDescriptor.createPipe();
+-            final ParcelFileDescriptor readEnd = pipe[0];
+-            final ParcelFileDescriptor writeEnd = pipe[1];
+-
+-            Thread t = new Thread(new Runnable() {
+-                @Override
+-                public void run() {
+-                    ParcelFileDescriptor.AutoCloseInputStream in = null;
+-                    RandomAccessFile out = null;
+-                    try {
+-                        in = new ParcelFileDescriptor.AutoCloseInputStream(readEnd);
+-                        out = new RandomAccessFile(target, "rw");
+-                        if (offset > 0) out.seek(offset);
+-                        byte[] buf = new byte[64 * 1024];
+-                        int n;
+-                        while ((n = in.read(buf)) > 0) {
+-                            out.write(buf, 0, n);
+-                        }
+-                    } catch (Throwable e) {
+-                        Slog.w(TAG, "session write failed for " + target.getName() + ": " + e);
+-                    } finally {
+-                        closeQuietly(in);
+-                        closeQuietly(out);
+-                    }
+-                }
+-            }, "dooble-session-write-" + target.getName());
+-            t.setDaemon(true);
+-            t.start();
+-            state.writers.add(t);
+-
+-            return writeEnd;
++            int mode = ParcelFileDescriptor.MODE_READ_WRITE | ParcelFileDescriptor.MODE_CREATE;
++            if (offset == 0) {
++                mode |= ParcelFileDescriptor.MODE_TRUNCATE;
++            }
++            final ParcelFileDescriptor pfd = ParcelFileDescriptor.open(target, mode);
++            if (offset > 0) {
++                try {
++                    android.system.Os.lseek(pfd.getFileDescriptor(),
++                            offset, android.system.OsConstants.SEEK_SET);
++                } catch (android.system.ErrnoException e) {
++                    pfd.close();
++                    throw new IOException("lseek failed for " + target.getName(), e);
++                }
++            }
++            return pfd;
+         }
+ 
+         private static Object openRead(SessionState state, Object[] args) throws IOException {

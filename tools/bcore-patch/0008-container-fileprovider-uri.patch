@@ -1,0 +1,165 @@
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/fake/provider/FileProvider.java b/Bcore/src/main/java/top/niunaijun/blackbox/fake/provider/FileProvider.java
+index 53cb4eb..6cd6c5d 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/fake/provider/FileProvider.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/provider/FileProvider.java
+@@ -11,6 +11,7 @@ import android.database.Cursor;
+ import android.database.MatrixCursor;
+ import android.net.Uri;
+ import android.os.Build;
++import android.os.Bundle;
+ import android.os.Environment;
+ import android.os.ParcelFileDescriptor;
+ import android.provider.OpenableColumns;
+@@ -90,6 +91,102 @@ public class FileProvider extends ContentProvider {
+         return strategy.getFileForUri(uri);
+     }
+ 
++    /**
++     * 容器内版本的 FileProvider URI 解析。
++     *
++     * 虚拟包在宿主的 PackageManager 里不可见，{@link #getFileForUri(Context, String, Uri)}
++     * 走 {@link #getPathStrategy(Context, String)} 时 `resolveContentProvider` 会返回 null，
++     * 于是整个解析在 `getPathStrategy` 的入口处就抛异常。这里直接用虚拟包自己的
++     * `ProviderInfo.metaData` + 虚拟包 Resources 来解析 FILE_PROVIDER_PATHS，
++     * 从而把 `content://<pkg>.fileProvider/<name>/<path>` 映射到容器内真实文件。
++     */
++    public static File getFileForUriInContainer(Context context, ProviderInfo provider, Uri uri) {
++        final PathStrategy strategy = getPathStrategyInContainer(context, provider);
++        return strategy.getFileForUri(uri);
++    }
++
++    private static PathStrategy getPathStrategyInContainer(Context context, ProviderInfo provider) {
++        final String authority = provider.authority;
++        PathStrategy strat;
++        synchronized (sCache) {
++            strat = sCache.get(authority);
++            if (strat == null) {
++                try {
++                    strat = parsePathStrategyInContainer(context, provider);
++                } catch (IOException e) {
++                    throw new IllegalArgumentException(
++                            "Failed to parse " + META_DATA_FILE_PROVIDER_PATHS + " meta-data", e);
++                } catch (XmlPullParserException e) {
++                    throw new IllegalArgumentException(
++                            "Failed to parse " + META_DATA_FILE_PROVIDER_PATHS + " meta-data", e);
++                }
++                sCache.put(authority, strat);
++            }
++        }
++        return strat;
++    }
++
++    private static PathStrategy parsePathStrategyInContainer(Context context, ProviderInfo provider)
++            throws IOException, XmlPullParserException {
++        final SimplePathStrategy strat = new SimplePathStrategy(provider.authority);
++
++        final Bundle meta = provider.metaData;
++        final int resId = meta != null ? meta.getInt(META_DATA_FILE_PROVIDER_PATHS, 0) : 0;
++        if (resId == 0) {
++            throw new IllegalArgumentException(
++                    "Missing " + META_DATA_FILE_PROVIDER_PATHS + " meta-data");
++        }
++
++        final XmlResourceParser in = context.getResources().getXml(resId);
++        if (in == null) {
++            throw new IllegalArgumentException(
++                    "Missing " + META_DATA_FILE_PROVIDER_PATHS + " meta-data");
++        }
++
++        int type;
++        while ((type = in.next()) != END_DOCUMENT) {
++            if (type == START_TAG) {
++                final String tag = in.getName();
++
++                final String name = in.getAttributeValue(null, ATTR_NAME);
++                String path = in.getAttributeValue(null, ATTR_PATH);
++
++                File target = null;
++                if (TAG_ROOT_PATH.equals(tag)) {
++                    target = DEVICE_ROOT;
++                } else if (TAG_FILES_PATH.equals(tag)) {
++                    target = context.getFilesDir();
++                } else if (TAG_CACHE_PATH.equals(tag)) {
++                    target = context.getCacheDir();
++                } else if (TAG_EXTERNAL.equals(tag)) {
++                    target = context.getExternalFilesDir(null);
++                } else if (TAG_EXTERNAL_FILES.equals(tag)) {
++                    File[] externalFilesDirs = ContextCompat.getExternalFilesDirs(context, null);
++                    if (externalFilesDirs.length > 0) {
++                        target = externalFilesDirs[0];
++                    }
++                } else if (TAG_EXTERNAL_CACHE.equals(tag)) {
++                    File[] externalCacheDirs = ContextCompat.getExternalCacheDirs(context);
++                    if (externalCacheDirs.length > 0) {
++                        target = externalCacheDirs[0];
++                    }
++                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP
++                        && TAG_EXTERNAL_MEDIA.equals(tag)) {
++                    File[] externalMediaDirs = context.getExternalMediaDirs();
++                    if (externalMediaDirs.length > 0) {
++                        target = externalMediaDirs[0];
++                    }
++                }
++
++                if (target != null) {
++                    strat.addRoot(name, buildPath(target, path));
++                }
++            }
++        }
++
++        return strat;
++    }
++
+     
+     @Override
+     public Cursor query(Uri uri, String[] projection, String selection,
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/fake/provider/FileProviderHandler.java b/Bcore/src/main/java/top/niunaijun/blackbox/fake/provider/FileProviderHandler.java
+index a3cf90b..ce939c0 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/fake/provider/FileProviderHandler.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/provider/FileProviderHandler.java
+@@ -9,10 +9,12 @@ import java.util.List;
+ 
+ import top.niunaijun.blackbox.BlackBoxCore;
+ import top.niunaijun.blackbox.app.BActivityThread;
++import top.niunaijun.blackbox.utils.Slog;
+ import top.niunaijun.blackbox.utils.compat.BuildCompat;
+ 
+ 
+ public class FileProviderHandler {
++    private static final String TAG = "FileProviderHandler";
+ 
+     public static Uri convertFileUri(Context context, Uri uri) {
+         if (BuildCompat.isN()) {
+@@ -25,16 +27,30 @@ public class FileProviderHandler {
+     }
+ 
+     public static File convertFile(Context context, Uri uri) {
++        if (context == null || uri == null) {
++            return null;
++        }
++        String authority = uri.getAuthority();
++        if (authority == null) {
++            return null;
++        }
++
+         List<ProviderInfo> providers = BActivityThread.getProviders();
+         for (ProviderInfo provider : providers) {
++            if (provider == null || !authority.equals(provider.authority)) {
++                continue;
++            }
+             try {
+-                File fileForUri = FileProvider.getFileForUri(context, provider.authority, uri);
++                File fileForUri = FileProvider.getFileForUriInContainer(context, provider, uri);
+                 if (fileForUri != null && fileForUri.exists()) {
+                     return fileForUri;
+                 }
+-            } catch (Exception ignored) {
++            } catch (Exception e) {
++                Slog.w(TAG, "convertFile failed for " + uri + " authority=" + authority
++                        + ": " + e.getMessage());
+             }
+         }
++        Slog.w(TAG, "convertFile: no matching provider for " + uri + " authority=" + authority);
+         return null;
+     }
+ }

@@ -69,6 +69,34 @@ class GmsSelfCheck(
     suspend fun run(spaceId: String): SelfCheckReport {
         val items = collectLocalItems(spaceId)
 
+        // ---- 组 6.5：存量空间补写 microG 设备注册开关(checkin) ----
+        //
+        // 为什么必须在这里补写：预写只发生在 GmsProvisioner.provision() 装配流程里，
+        // 而**已经装配过的存量空间不会再走装配**——它们缺这个键，登录页就永远卡在
+        // 「正在建立到 Google 服务器的连接」。自检是这些空间几乎必然会进入的排障入口，
+        // 在这里幂等补写（已开启不动、用户显式关闭则尊重现状）成本最低。
+        // 补写本身是纯文件 IO，run() 的调用方已保证在 IO 线程。
+        val bcoreUserId = engine.space(spaceId)?.bcoreUserId ?: 0
+        var checkinReady = false
+        if (bcoreUserId > 0) {
+            checkinReady = runCatching {
+                MicroGCheckinBootstrap.ensureEnabled(context.dataDir, bcoreUserId)
+            }.getOrDefault(false)
+        }
+        items += CheckItem(
+            "谷歌环境", "microG 设备注册(checkin)",
+            when {
+                bcoreUserId <= 0 -> CheckStatus.WARN
+                checkinReady -> CheckStatus.PASS
+                else -> CheckStatus.WARN
+            },
+            when {
+                bcoreUserId <= 0 -> "无法定位空间，未处理。"
+                checkinReady -> "已开启（存量空间已自动补写）。microG 登录前会先完成设备注册。"
+                else -> "未能自动开启，请到 microG 设置 → 向 Google 注册设备 手动打开。"
+            },
+        )
+
         // ---- 组 7：网络 ----
         //
         // 放在最后是有意的：它是唯一一个**会真的发网络请求**的检查项（最多 6 秒），

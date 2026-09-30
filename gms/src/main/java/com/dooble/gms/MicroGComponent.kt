@@ -49,6 +49,13 @@ enum class MicroGComponent(
     /** 上游 release 里华为/荣耀变体的文件名；null 表示上游没有出这个变体 */
     val remoteNameHw: String? = null,
     /**
+     * 在 release 资产列表里匹配文件名时用的**前缀**。
+     *
+     * 默认用包名（官方 microG 的资产名就是 `com.google.android.gms-xxx.apk`）。
+     * microG RE 的资产名是 `microg-7.1.1-*.apk`，不以包名开头，必须显式声明。
+     */
+    val assetPrefix: String = packageName,
+    /**
      * 无官方直链的原因。非 null 表示这个组件**拿不到可直接安装的文件**，
      * UI 必须走"手动导入"路径，并把这个理由显示出来。
      */
@@ -98,6 +105,23 @@ enum class MicroGComponent(
         downloadRepo = "microg/GsfProxy",
         releaseTag = "v0.1.0",
         remoteName = "GsfProxy.apk",
+    ),
+
+    MICROG_RE(
+        packageName = "app.revanced.android.gms",
+        assetName = "microg-re.apk",
+        system = true,
+        required = false,
+        approxSizeMb = 112,
+        shortName = "microG RE",
+        description = "microG RE（ReVanced 分支）：为 ReVanced/Morphe 修补应用提供 GMS 能力。" +
+            "注意它使用**独立包名** app.revanced.android.gms，不是 com.google.android.gms，" +
+            "普通 Google 应用不会把它识别为 Play 服务，也不参与 Google 账号登录。",
+        downloadRepo = "morpheapp/MicroG-RE",
+        releaseTag = "7.1.1",
+        remoteName = "microg-7.1.1.apk",
+        remoteNameHw = "microg-7.1.1-noicon.apk",
+        assetPrefix = "microg",
     ),
 
     MAPS_V1(

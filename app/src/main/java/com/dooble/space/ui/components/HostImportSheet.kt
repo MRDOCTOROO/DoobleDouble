@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -24,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -33,21 +35,16 @@ import com.dooble.engine.HostAppInfo
 import com.dooble.engine.HostAppRules
 import com.dooble.space.system.AppListAccess
 import com.dooble.space.ui.rememberHostAppIcon
-import com.dooble.space.ui.theme.Acid
 import com.dooble.space.ui.theme.Danger
 import com.dooble.space.ui.theme.Ink
 import com.dooble.space.ui.theme.InkFaint
 import com.dooble.space.ui.theme.InkSoft
-import com.dooble.space.ui.theme.Mint
-import com.dooble.space.ui.theme.Paper
-import com.dooble.space.ui.theme.PaperDeep
 import com.dooble.space.ui.theme.Success
 
 /**
  * 从宿主已安装应用里挑一个导入空间。
  *
- * 用全屏 Dialog 而不是 BottomSheet：这个列表通常有一两百项，需要搜索框常驻，
- * 底部抽屉的高度限制会让可用区域变得很小。
+ * 用全屏 Dialog 而不是 BottomSheet：列表通常有一两百项，需要搜索框常驻。
  */
 @Composable
 fun HostImportSheet(
@@ -73,43 +70,34 @@ fun HostImportSheet(
         Column(
             Modifier
                 .fillMaxSize()
-                .background(Paper)
+                .background(Color(0xF5F2F0EB))
         ) {
-            // ---------------------------------------------------- 顶栏
+            // 顶栏
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .background(Ink)
                     .padding(horizontal = 16.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(Modifier.weight(1f)) {
+                    Text("从已安装应用导入", style = MaterialTheme.typography.titleLarge, color = Ink)
                     Text(
-                        text = "从已安装应用导入",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = Acid,
-                    )
-                    Text(
-                        text = "共 ${apps.size} 个可导入应用",
+                        "共 ${apps.size} 个可导入应用",
                         style = MaterialTheme.typography.labelSmall,
-                        color = PaperDeep,
+                        color = InkFaint,
                     )
                 }
-                Box(
-                    Modifier
-                        .border(3.dp, Acid)
-                        .background(Ink)
-                        .brutalClickable { onDismiss() }
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("关闭", style = MaterialTheme.typography.labelMedium, color = Acid)
-                }
+                GlassButton(
+                    text = "关闭",
+                    onClick = onDismiss,
+                    variant = ButtonVariant.Secondary,
+                    compact = true,
+                )
             }
 
-            // ---------------------------------------------------- 搜索
-            Box(Modifier.padding(16.dp)) {
-                BrutalTextField(
+            // 搜索
+            Box(Modifier.padding(horizontal = 16.dp)) {
+                GlassTextField(
                     value = query,
                     onValueChange = {
                         query = it
@@ -120,99 +108,89 @@ fun HostImportSheet(
                 )
             }
 
-            // ---------------------------------------------------- 筛选
+            // 筛选
             Row(
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 FilterToggle(
                     label = "包含系统应用",
                     checked = includeSystem,
                     accent = accent,
-                    onCheckedChange = { onToggleSystem(it) },
+                    onCheckedChange = onToggleSystem,
                 )
                 FilterToggle(
                     label = "只看依赖 GMS",
                     checked = onlyGmsDependent,
                     accent = accent,
-                    onCheckedChange = { onToggleGms(it) },
+                    onCheckedChange = onToggleGms,
                 )
             }
 
-            Spacer(Modifier.height(14.dp))
-
-            // ---------------------------------------------------- 说明
-            BrutalSurface(
+            // 说明
+            GlassCard(
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                background = PaperDeep,
-                shadowOffset = 3.dp,
+                tint = Color.White.copy(alpha = 0.42f),
                 contentPadding = 12.dp,
             ) {
                 Text(
-                    text = "导入由容器直接读取系统的安装路径，不需要存储权限。" +
-                        "宿主上是系统应用的（GMS / Play 商店等）也能导入 —— " +
-                        "这条路径走容器的 system 语义，容器内会以系统应用身份呈现。" +
-                        "注意：带「拆分包」标记的应用（AAB 分发）目前只会装入基础 APK，" +
-                        "运行时多半会缺资源——容器侧的多 APK 安装尚未实现。",
+                    text = "导入由容器直接读取系统的安装路径，不需要存储权限。宿主上的系统应用（GMS / Play 商店等）也能导入——这条路径走容器的 system 语义。注意：带「拆分包」标记的应用目前只会装入基础 APK。",
                     style = MaterialTheme.typography.labelSmall,
                     color = InkSoft,
                 )
             }
 
-            // ---------------------------------------------------- 权限引导
+            // 权限引导
             if (visibility?.gated == true) {
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(12.dp))
                 Box(Modifier.padding(horizontal = 16.dp)) {
-                    AppListAccessBanner(
-                        verdict = visibility,
-                        accent = accent,
-                        onOpen = onOpenGuide,
-                    )
+                    AppListAccessBanner(verdict = visibility, accent = accent, onOpen = onOpenGuide)
                 }
             }
 
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(12.dp))
 
-            // ---------------------------------------------------- 列表
-            if (scanning && apps.isEmpty()) {
-                Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
-                    Text(
-                        "正在扫描已安装应用…",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = InkFaint,
-                    )
-                }
-            } else if (apps.isEmpty()) {
-                Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("//", style = MaterialTheme.typography.displayMedium, color = InkFaint)
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            text = if (query.isBlank()) "没有可导入的应用" else "没有匹配「$query」的应用",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = InkSoft,
-                        )
-                        // 列表为空最常见的几个原因，直接说出来，别让用户以为功能坏了
-                        Spacer(Modifier.height(10.dp))
-                        HostListEmptyHints(
-                            includeSystem = includeSystem,
-                            gated = visibility?.gated == true,
-                        )
+            // 列表
+            when {
+                scanning && apps.isEmpty() -> {
+                    Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
+                        Text("正在扫描已安装应用…", style = MaterialTheme.typography.bodyMedium, color = InkFaint)
                     }
                 }
-            } else {
-                LazyColumn(
-                    Modifier.fillMaxSize().padding(horizontal = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    items(apps, key = { it.packageName }) { app ->
-                        HostAppRow(
-                            app = app,
-                            accent = accent,
-                            onImport = { onImport(app.packageName) },
-                        )
+
+                apps.isEmpty() -> {
+                    Box(Modifier.fillMaxWidth().padding(40.dp), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("暂无", style = MaterialTheme.typography.displayMedium, color = InkFaint)
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = if (query.isBlank()) "没有可导入的应用" else "没有匹配「$query」的应用",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = InkSoft,
+                            )
+                            Spacer(Modifier.height(10.dp))
+                            HostListEmptyHints(
+                                includeSystem = includeSystem,
+                                gated = visibility?.gated == true,
+                            )
+                        }
                     }
-                    item { Spacer(Modifier.height(24.dp)) }
+                }
+
+                else -> {
+                    LazyColumn(
+                        Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        items(apps, key = { it.packageName }) { app ->
+                            HostAppRow(
+                                app = app,
+                                accent = accent,
+                                onImport = { onImport(app.packageName) },
+                            )
+                        }
+                        item { Spacer(Modifier.height(24.dp)) }
+                    }
                 }
             }
         }
@@ -228,19 +206,18 @@ private fun FilterToggle(
 ) {
     Row(
         Modifier
-            .border(3.dp, Ink)
-            .background(if (checked) accent else Paper)
-            .brutalClickable { onCheckedChange(!checked) }
-            .padding(horizontal = 12.dp, vertical = 9.dp),
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (checked) accent.copy(alpha = 0.18f) else Color.White.copy(alpha = 0.55f))
+            .border(1.dp, if (checked) accent.copy(alpha = 0.6f) else Color.White.copy(alpha = 0.8f), RoundedCornerShape(12.dp))
+            .glassClickable { onCheckedChange(!checked) }
+            .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // 用方块而不是 Material 的 Switch：与全站的新粗野主义风格一致，
-        // 而且 3dp 描边的方块在等宽字体标签旁边视觉重量更对
         Box(
             Modifier
-                .size(11.dp)
-                .border(2.dp, Ink)
-                .background(if (checked) Ink else Paper)
+                .size(12.dp)
+                .border(2.dp, if (checked) accent else InkFaint, RoundedCornerShape(6.dp))
+                .background(if (checked) accent else Color.White.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
         )
         Spacer(Modifier.width(8.dp))
         Text(
@@ -259,81 +236,55 @@ private fun HostAppRow(
 ) {
     val icon = rememberHostAppIcon(app.packageName)
 
-    BrutalSurface(
+    GlassCard(
         Modifier.fillMaxWidth(),
-        background = Paper,
-        shadowOffset = 4.dp,
-        onClick = onImport,
+        shape = RoundedCornerShape(16.dp),
+        contentPadding = 12.dp,
     ) {
-        Row(
-            Modifier.fillMaxWidth().padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            AppIconBadge(
-                icon = icon,
-                label = app.label,
-                accent = accent,
-                size = 42.dp,
-            )
-
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AppIconBadge(icon = icon, label = app.label, accent = accent, size = 42.dp)
             Spacer(Modifier.width(12.dp))
 
             Column(Modifier.weight(1f)) {
-                Text(
-                    text = app.label,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = Ink,
-                    maxLines = 1,
-                )
-                Text(
-                    text = app.packageName,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = InkSoft,
-                    maxLines = 1,
-                )
-                Spacer(Modifier.height(6.dp))
+                Text(app.label, style = MaterialTheme.typography.titleMedium, color = Ink, maxLines = 1)
+                Text(app.packageName, style = MaterialTheme.typography.labelSmall, color = InkSoft, maxLines = 1)
+
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (app.needsGoogleEnvironment) {
-                        BrutalChip(text = "依赖 GMS", background = Mint, contentColor = Success)
+                        GlassChip(
+                            text = "依赖 GMS",
+                            background = Success.copy(alpha = 0.14f),
+                            contentColor = Success,
+                        )
                     }
                     if (app.hasSplits) {
-                        // 用警示色而不是普通的 Tangerine：这个标记意味着
-                        // "导进去也不会完整"，是风险提示，不是信息标签
-                        BrutalChip(
+                        GlassChip(
                             text = "拆分包 ${app.splitApks.size + 1} 项 · 仅装基础包",
-                            background = PaperDeep,
+                            background = Color.White.copy(alpha = 0.5f),
                             contentColor = Danger,
                         )
                     }
                     if (app.isSystem) {
-                        BrutalChip(text = "系统应用", background = PaperDeep, contentColor = InkFaint)
+                        GlassChip(text = "系统应用", background = Color.White.copy(alpha = 0.5f), contentColor = InkFaint)
                     }
-                    BrutalChip(text = formatSize(app.sizeBytes), background = PaperDeep)
+                    GlassChip(text = formatSize(app.sizeBytes), background = Color.White.copy(alpha = 0.5f))
                 }
             }
 
             Spacer(Modifier.width(10.dp))
 
-            Box(
-                Modifier
-                    .border(3.dp, Ink)
-                    .background(Acid)
-                    .brutalClickable { onImport() }
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("导入", style = MaterialTheme.typography.labelMedium, color = Ink)
-            }
+            GlassButton(
+                text = "导入",
+                onClick = onImport,
+                variant = ButtonVariant.Accent,
+                accent = accent,
+                compact = true,
+            )
         }
     }
 }
 
-/**
- * 人类可读的体积。
- *
- * 刻意用 1024 进制：用户对比的是系统"应用信息"页里的数字，
- * 那里用的就是 1024 进制，用 1000 进制会显示成两个不一样的数。
- */
+/** 人类可读的体积（1024 进制，与系统应用信息页一致） */
 internal fun formatSize(bytes: Long): String = when {
     bytes <= 0L -> "—"
     bytes < 1024L -> "${bytes}B"

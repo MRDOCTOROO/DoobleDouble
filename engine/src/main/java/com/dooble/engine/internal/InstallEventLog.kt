@@ -135,6 +135,22 @@ object InstallEventLog {
         impl = InstallEventFile(File(dir, InstallEventFile.FILE_NAME))
     }
 
+    /**
+     * 容器进程的兜底初始化。
+     *
+     * [init] 由宿主主进程在 [com.dooble.engine.VirtualEngine.initialize] 里调用，
+     * 但写入方（[com.dooble.engine.bcore.ContainerInstallRelay]）跑在**虚拟应用进程**
+     * （如 Aurora 所在的 `:p0`）——那个进程不执行宿主的 Application.onCreate，
+     * `impl` 是 null，[record] 会静默丢弃，UI 的「最近装入」永远为空。
+     * 写入前用宿主 filesDir 兜底 init 一次，路径与主进程严格一致。
+     */
+    fun ensureInit(filesDir: File) {
+        if (impl != null) return
+        synchronized(this) {
+            if (impl == null) init(filesDir)
+        }
+    }
+
     /** 容器进程调用：追加一条事件 */
     fun record(event: InstallEvent) {
         impl?.append(event)

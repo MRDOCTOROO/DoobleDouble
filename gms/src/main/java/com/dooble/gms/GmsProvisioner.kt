@@ -108,11 +108,42 @@ class GmsProvisioner(
             }
         }
 
+        // microG RE 是**独立仓库**，tag 与资产名跟官方 microG 完全不同，
+        // 上面的 release 不能拿给 RE 用（仓库核对不过，candidates 会走硬编码回退，
+        // 但也就丢了 digest 校验）。装配可选组件时单独查一次 RE 的 release。
+        val reRelease = if (includeOptional && MicroGComponent.MICROG_RE in components) {
+            when (val r = MicroGVersionChecker.latest(MicroGVersionChecker.REVANCED_REPO)) {
+                is MicroGVersionChecker.Result.Ok -> {
+                    onStep(
+                        ProvisionStep(
+                            null, 0, total, ProvisionPhase.RESOLVE,
+                            "已解析 microG RE 版本 ${r.release.tag}（${r.release.assets.size} 个资产）",
+                        )
+                    )
+                    r.release
+                }
+
+                is MicroGVersionChecker.Result.Failed -> {
+                    onStep(
+                        ProvisionStep(
+                            null, 0, total, ProvisionPhase.RESOLVE,
+                            "无法查询 microG RE 最新版本（${r.reason}），回退到内置版本 ${MicroGComponent.MICROG_RE.releaseTag}",
+                        )
+                    )
+                    null
+                }
+            }
+        } else {
+            null
+        }
+
         components.forEachIndexed { i, component ->
             val idx = i + 1
             try {
                 onStep(ProvisionStep(component, idx, total, ProvisionPhase.RESOLVE, "准备 ${component.packageName}"))
-                val apk = resolveApk(component, huaweiVariant, release) { done, len ->
+                val componentRelease =
+                    if (component == MicroGComponent.MICROG_RE) reRelease else release
+                val apk = resolveApk(component, huaweiVariant, componentRelease) { done, len ->
                     val p = if (len > 0) done.toFloat() / len else 0f
                     onStep(
                         ProvisionStep(

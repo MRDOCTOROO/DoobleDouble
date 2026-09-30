@@ -1,9 +1,5 @@
 package com.dooble.space.ui.components
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,87 +9,89 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.dooble.space.ui.theme.Ink
-import com.dooble.space.ui.theme.InkSoft
-import com.dooble.space.ui.theme.Paper
-import com.dooble.space.ui.theme.PaperDeep
+import com.dooble.space.ui.theme.InkFaint
 
 /**
- * 顶部栏：左侧可选的返回方块，中间标题 + 等宽副标题，右侧动作区。
- * 底部一条 3dp 黑线收口，是整套视觉的"结构外露"基调。
+ * 顶部栏。
+ *
+ * [largeTitle] = true 时是 iOS 风格大标题（首页用）：标题左对齐、粗体，
+ * 下方灰色小字副标题，背景透明融入亚克力画布。
+ * [largeTitle] = false 时是紧凑导航栏（二级页用）：居中标题 + 左侧返回键。
  */
 @Composable
-fun DoobleTopBar(
+fun GlassTopBar(
     title: String,
     subtitle: String? = null,
-    accent: Color = MaterialTheme.colorScheme.primary,
     onBack: (() -> Unit)? = null,
+    largeTitle: Boolean = true,
     actions: @Composable RowScope.() -> Unit = {},
 ) {
-    Column(Modifier.fillMaxWidth().background(Paper)) {
+    if (largeTitle) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 12.dp),
+                .padding(start = 18.dp, end = 16.dp, top = 16.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (onBack != null) {
-                Box(
-                    Modifier
-                        .size(36.dp)
-                        .border(3.dp, Ink)
-                        .background(PaperDeep)
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            onClick = onBack,
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Ink)
-                }
-                Spacer(Modifier.width(12.dp))
-            }
-
             Column(Modifier.weight(1f)) {
                 Text(
                     text = title,
-                    style = MaterialTheme.typography.headlineMedium,
+                    style = MaterialTheme.typography.displayMedium,
                     color = Ink,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
                 if (subtitle != null) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(8.dp).background(accent))
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = subtitle.uppercase(),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = InkSoft,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
+                    Text(
+                        text = subtitle.uppercase(),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = InkFaint,
+                        maxLines = 1,
+                    )
                 }
             }
-
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), content = actions)
         }
-        Box(Modifier.fillMaxWidth().height(3.dp).background(Ink))
+    } else {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp)
+                .height(48.dp)
+        ) {
+            if (onBack != null) {
+                GlassIconButton(
+                    icon = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "返回",
+                    onClick = onBack,
+                    modifier = Modifier.align(Alignment.CenterStart),
+                )
+            }
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleLarge,
+                color = Ink,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.align(Alignment.Center),
+            )
+            Row(
+                Modifier.align(Alignment.CenterEnd),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                content = actions,
+            )
+        }
     }
 }

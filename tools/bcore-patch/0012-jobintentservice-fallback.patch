@@ -1,0 +1,134 @@
+From: Dooble Double <noreply@example.invalid>
+Subject: [PATCH 0012] JobService 派发支持 JobIntentService 回退（修复 F-Droid 下载不启动）
+
+F-Droid 的 DownloaderService 继承 androidx.core.app.JobIntentService，
+不是 android.app.job.JobService。容器 JobService 派发路径
+（BActivityThread.createJobService 强转 JobService）对它抛
+ClassCastException，任务被丢弃，下载永远停在「正在等待开始下载」。
+
+AppJobServiceDispatcher.onStartJob 增加回退：JobService 创建失败时，
+把目标服务按普通 Service 实例化、attach、onCreate、onBind(null)，
+拿到 JobIntentService 的 JobServiceEngine binder（隐藏接口
+android.app.job.IJobService），反射调用 onStartJob(params)，
+让 JobIntentService 从 JobParameters extras 里读 work intent 并执行。
+
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/app/dispatcher/AppJobServiceDispatcher.java b/Bcore/src/main/java/top/niunaijun/blackbox/app/dispatcher/AppJobServiceDispatcher.java
+index d31c56e..f1afa10 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/app/dispatcher/AppJobServiceDispatcher.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/app/dispatcher/AppJobServiceDispatcher.java
+@@ -1,18 +1,23 @@
+ package top.niunaijun.blackbox.app.dispatcher;
+ 
++import android.app.Service;
+ import android.app.job.JobParameters;
+ import android.app.job.JobService;
+ import android.content.res.Configuration;
++import android.os.IBinder;
+ 
++import java.lang.reflect.Method;
+ import java.util.HashMap;
+ import java.util.Map;
+ 
+ import top.niunaijun.blackbox.BlackBoxCore;
+ import top.niunaijun.blackbox.app.BActivityThread;
+ import top.niunaijun.blackbox.entity.JobRecord;
++import top.niunaijun.blackbox.utils.Slog;
+ 
+ 
+ public class AppJobServiceDispatcher {
++    private static final String TAG = "AppJobServiceDispatcher";
+     private static final AppJobServiceDispatcher sServiceDispatcher = new AppJobServiceDispatcher();
+     private final Map<Integer, JobRecord> mJobRecords = new HashMap<>();
+ 
+@@ -23,19 +28,24 @@ public class AppJobServiceDispatcher {
+     public boolean onStartJob(JobParameters params) {
+         try {
+             JobService jobService = getJobService(params.getJobId());
+-            if (jobService == null)
+-                return false;
+-            return jobService.onStartJob(params);
+-        } catch (Exception e) {
+-            e.printStackTrace();
++            if (jobService != null) {
++                return jobService.onStartJob(params);
++            }
++        } catch (Throwable t) {
++            Slog.w(TAG, "onStartJob via JobService failed", t);
+         }
+-        return false;
++        // 回退：F-Droid 等应用的 DownloaderService 继承 androidx.core.app.JobIntentService
++        //（不是 android.app.job.JobService）。容器不能直接实例化成 JobService，这里
++        // 走 JobIntentService 的 JobServiceEngine：onBind 返回 IJobService binder，
++        // 反射调 onStartJob，让 JobIntentService 从 JobParameters 里读 work intent。
++        return startJobServiceCompat(params);
+     }
+ 
+     public boolean onStopJob(JobParameters params) {
+         JobService jobService = getJobService(params.getJobId());
+-        if (jobService == null)
++        if (jobService == null) {
+             return false;
++        }
+         boolean b = jobService.onStopJob(params);
+         jobService.onDestroy();
+         synchronized (mJobRecords) {
+@@ -85,8 +95,9 @@ public class AppJobServiceDispatcher {
+             try {
+                 JobRecord record = BlackBoxCore.getBJobManager().queryJobRecord(BlackBoxCore.getAppProcessName(), jobId);
+                 record.mJobService = BlackBoxCore.currentActivityThread().createJobService(record.mServiceInfo);
+-                if (record.mJobService == null)
++                if (record.mJobService == null) {
+                     return null;
++                }
+                 mJobRecords.put(jobId, record);
+                 return record.mJobService;
+             } catch (Throwable t) {
+@@ -95,4 +106,46 @@ public class AppJobServiceDispatcher {
+             return null;
+         }
+     }
+-}
++
++    /**
++     * JobIntentService 回退路径。
++     *
++     * <p>JobIntentService 的 onBind 返回隐藏接口 android.app.job.IJobService 的
++     * binder（JobServiceEngine）。容器把服务实例化、attach、onCreate、onBind 之后，
++     * 用反射拿到 IJobService，再调 onStartJob(params)——JobIntentService 会从
++     * params 的 extras 里取出 work intent 并执行，这样 F-Droid 的下载任务就能跑了。
++     */
++    private boolean startJobServiceCompat(JobParameters params) {
++        JobRecord record = null;
++        try {
++            record = BlackBoxCore.getBJobManager().queryJobRecord(
++                    BlackBoxCore.getAppProcessName(), params.getJobId());
++            if (record == null || record.mServiceInfo == null) {
++                Slog.w(TAG, "JobIntentService fallback: no JobRecord for " + params.getJobId());
++                return false;
++            }
++            Service service = BlackBoxCore.currentActivityThread().createService(
++                    record.mServiceInfo,
++                    BActivityThread.currentActivityThread().getActivityThread());
++            if (service == null) {
++                Slog.w(TAG, "JobIntentService fallback: cannot create " + record.mServiceInfo.name);
++                return false;
++            }
++            IBinder binder = service.onBind(null);
++            if (binder == null) {
++                Slog.w(TAG, "JobIntentService fallback: onBind returned null for " + record.mServiceInfo.name);
++                return false;
++            }
++            Class<?> stubClass = Class.forName("android.app.job.IJobService$Stub");
++            Method asInterface = stubClass.getMethod("asInterface", IBinder.class);
++            Object iJobService = asInterface.invoke(null, binder);
++            Method onStartJob = iJobService.getClass().getMethod("onStartJob", JobParameters.class);
++            Object result = onStartJob.invoke(iJobService, params);
++            return result instanceof Boolean ? (Boolean) result : false;
++        } catch (Throwable t) {
++            Slog.w(TAG, "JobIntentService fallback failed for job " + params.getJobId()
++                    + (record != null ? " / " + record.mServiceInfo.name : ""), t);
++            return false;
++        }
++    }
++}
+\ No newline at end of file

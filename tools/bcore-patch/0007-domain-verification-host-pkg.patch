@@ -20,10 +20,10 @@ index 3701fe5..91bef8c 100644
          addInjector(new ISettingsSystemProxy());
 diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IDomainVerificationManagerProxy.java b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IDomainVerificationManagerProxy.java
 new file mode 100644
-index 0000000..50aa791
+index 0000000..0e6bfd0
 --- /dev/null
 +++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IDomainVerificationManagerProxy.java
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,77 @@
 +package top.niunaijun.blackbox.fake.service;
 +
 +import android.os.IBinder;
@@ -47,9 +47,11 @@ index 0000000..50aa791
 + *
 + * 表现：Aurora Store 点「安装」时整段逻辑被这个异常打断，按钮看起来毫无反应。
 + *
-+ * 做法：把查询的包名换成宿主自身。调用方拿到的是一份合法但为空的链接状态，
-+ * 逻辑得以继续；对真正的链接处理没有影响，因为容器内应用本来也不参与宿主的
-+ * 默认链接归属。
++ * 做法：虚拟包在宿主侧不存在，直接返回 null（与真实“未验证”语义一致），而不是
++ * 把包名换成宿主自身。为什么不能换成宿主：宿主未声明任何链接时 hostToStateMap
++ * 为空，Aurora 的 Context.isDomainVerified 会对过滤后的空集合调用 first()，
++ * 抛 NoSuchElementException（Compose 捕获后表现为按钮无反应）。返回 null 让
++ * 调用方走空安全链，优雅地得到“未验证”。
 + */
 +public class IDomainVerificationManagerProxy extends BinderInvocationStub {
 +    public static final String TAG = "DomainVerificationStub";
@@ -89,12 +91,13 @@ index 0000000..50aa791
 +    public static class GetDomainVerificationUserState extends MethodHook {
 +        @Override
 +        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
-+            if (args != null && args.length > 0 && args[0] instanceof String) {
-+                Slog.d(TAG, "getDomainVerificationUserState: " + args[0]
-+                        + " -> " + BlackBoxCore.getHostPkg());
-+                args[0] = BlackBoxCore.getHostPkg();
-+            }
-+            return method.invoke(who, args);
++            // 虚拟包在宿主 PM 里不存在，真实调用必然抛 NameNotFoundException。
++            // 直接返回 null：调用方（Aurora 的 isDomainVerified）拿到 null 后走
++            // 空安全链返回 false，不再被异常打断，也不会因空集合 first() 崩溃。
++            // 不区分重载形态（(String)、(int,String)、(String,int) 都出现过），
++            // 统一返回 null —— 虚拟包在宿主侧没有 domain 状态，null 才是正确语义。
++            Slog.d(TAG, "getDomainVerificationUserState -> null (virtual package has no host domain state)");
++            return null;
 +        }
 +    }
 +}
