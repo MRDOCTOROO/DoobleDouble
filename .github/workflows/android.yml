@@ -20,8 +20,21 @@ on:
   push:
     branches: [main, master]
     tags: ['v*']
+    # 纯文档/说明类提交不触发构建，省 GitHub 免费 Actions 分钟。
+    # tag 发布不受影响：v* tag 指向的都是改过代码/AAR/补丁的提交，
+    # paths-ignore 只有在「全部变更文件都被忽略」时才跳过。
+    paths-ignore:
+      - 'docs/**'
+      - 'AGENTS.md'
+      - '**/*.md'
+      - 'README*'
   pull_request:
     branches: [main, master]
+    paths-ignore:
+      - 'docs/**'
+      - 'AGENTS.md'
+      - '**/*.md'
+      - 'README*'
   workflow_dispatch:
     inputs:
       build_full:
