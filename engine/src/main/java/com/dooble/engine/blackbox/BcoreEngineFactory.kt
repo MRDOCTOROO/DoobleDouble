@@ -1,9 +1,11 @@
 package com.dooble.engine.blackbox
 
+import android.content.Context
 import com.dooble.engine.VirtualEngine
+import com.dooble.engine.VirtualEngineFactory
 
 /**
- * Bcore 引擎的探测入口。
+ * Bcore 引擎的工厂 SPI 实现。
  *
  * ## 为什么这一层必须存在
  *
@@ -16,21 +18,24 @@ import com.dooble.engine.VirtualEngine
  * 悄悄失效。真正的 Bcore API 调用全部由编译器在 [com.dooble.engine.bcore.BcoreEngine]
  * 内部校验。
  */
-object BcoreEngineFactory {
+object BcoreEngineFactory : VirtualEngineFactory {
 
     private const val IMPL_CLASS = "com.dooble.engine.bcore.BcoreEngine"
 
+    override val id: String = "bcore"
+
     /** AAR 是否已接入。UI 用它区分「引擎缺失」和「引擎初始化失败」 */
-    val available: Boolean
+    override val available: Boolean
         get() = runCatching { Class.forName(IMPL_CLASS) }.isSuccess
 
     /**
-     * 构造 Bcore 引擎；AAR 缺失或构造失败时返回 null，由调用方降级。
+     * 构造 Bcore 引擎；AAR 缺失或构造失败时返回 null，由注册表继续尝试下一个候选。
      *
      * 构造本身很轻（只是 `BlackBoxCore.get()`），可以在
-     * `Application.attachBaseContext` 里同步调用。
+     * `Application.attachBaseContext` 里同步调用。`context` 参数对本引擎无意义，
+     * 保留它只是为了满足 [VirtualEngineFactory] 契约。
      */
-    fun createOrNull(): VirtualEngine? = runCatching {
+    override fun create(context: Context): VirtualEngine? = runCatching {
         val cls = Class.forName(IMPL_CLASS)
         cls.getMethod("create").invoke(null) as? VirtualEngine
     }.getOrNull()

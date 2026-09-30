@@ -3,6 +3,7 @@ package com.dooble.space
 import android.app.Application
 import android.content.Context
 import com.dooble.engine.EngineProvider
+import com.dooble.engine.EngineRegistry
 import com.dooble.engine.VirtualEngine
 import com.dooble.engine.HostAppScanner
 import com.dooble.engine.blackbox.BcoreEngineFactory
@@ -115,7 +116,10 @@ object DoobleContainer {
      */
     fun bootstrapHost(application: Application, base: Context) {
         if (engineRef != null) return
-        val engine = runCatching { BcoreEngineFactory.createOrNull() }.getOrNull() ?: return
+        // 通过 SPI 注册表按优先级探测（Bcore → 沙箱），而不是硬编码某一个引擎。
+        val engine = runCatching {
+            EngineRegistry.instance.createFirstAvailable(application)
+        }.getOrNull() ?: return
         engineRef = engine
         runCatching { engine.bootstrapHost(application, base) }
     }
@@ -127,9 +131,9 @@ object DoobleContainer {
 
         scope.launch {
             try {
-                // 复用第一段建好的实例；没有则现探测，再不行降级沙箱
+                // 复用第一段建好的实例；没有则通过 SPI 注册表现探测，再不行降级沙箱
                 val engine: VirtualEngine = engineRef
-                    ?: BcoreEngineFactory.createOrNull()
+                    ?: EngineRegistry.instance.createFirstAvailable(app)
                     ?: SandboxEngine(app).also { engineRef = it }
 
                 // 进程级初始化（加载 native、起 VAServer、等系统 hook 就绪）
@@ -147,7 +151,7 @@ object DoobleContainer {
                 _boot.value = BootState.Ready(
                     engineName = engine.name,
                     degraded = engine.name == SandboxEngine.NAME,
-                    bcoreBundled = BcoreEngineFactory.available,
+                    bcoreBundled = EngineRegistry.instance.isAvailable(BcoreEngineFactory.id),
                     nativeAvailable = NativeBridge.available,
                     nativeVersion = NativeBridge.version,
                 )

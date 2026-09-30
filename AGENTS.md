@@ -10,7 +10,7 @@ app(宿主 UI/服务/编排) → gms(microG 供给/签名伪造/自检) → engi
 
 - `gms` 通过 `api(project(":engine"))` 依赖 engine;**engine 不得反向依赖 gms**。
 - `engine/src/bcore/` 源集仅在 `engine/libs/bcore.aar` 存在时参与编译(compileOnly);AAR 由 `tools/build-bcore.sh`(JDK 21 + 本地源码 `~/android-dev/nbb-src` + `tools/bcore-patch/*.patch`)构建,改补丁后**必须重建并提交 AAR**,CI 用的是入库的 AAR。
-- AAR 缺失时降级 `SandboxEngine`(`BcoreEngineFactory` 探测)。
+- AAR 缺失时降级 `SandboxEngine`。引擎选择走 `EngineRegistry` SPI（注册顺序：`BcoreEngineFactory` → `SandboxEngineFactory`），见 docs/12。
 
 ## 硬性契约(有专门的契约测试钉着,改动必须同步)
 
