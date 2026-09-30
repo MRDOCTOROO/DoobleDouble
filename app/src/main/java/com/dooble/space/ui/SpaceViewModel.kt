@@ -610,14 +610,41 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 用户从系统设置返回后调用：重扫宿主应用并刷新槽位可用性。
+     * 详情页每次回到前台时调用（`ON_RESUME`）：重扫宿主应用、刷新槽位可用性、
+     * **并刷新空间内应用列表**。
      *
-     * 单独一个入口而不是让 UI 直接调两个函数：这两件事必须一起做，
+     * 必须一起做的三件事：
+     *  1. `scanHostApps`：用户可能刚在系统设置里开了「读取应用列表」权限；
+     *  2. `refreshHostGooglePackages`：宿主上的谷歌相关包可能变了；
+     *  3. `refreshApps`：用户刚从容器内的应用商店返回，商店可能刚装完一个应用——
+     *     不刷的话，新应用不会出现在「容器桌面」，看起来像"装完就没了"。
+     *     这正是「商店里装的应用要直接出现在桌面」的核心路径。
+     *
+     * 单独一个入口而不是让 UI 直接调多个函数：这些事必须一起做，
      * 分开写必然出现"只刷了一个"的错。
      */
     fun onReturnedFromSettings() {
         scanHostApps(hostQuery)
         refreshHostGooglePackages()
+        refreshApps()
+    }
+
+    /**
+     * 详情页常驻时的轻量轮询：检查容器内是否有新的安装事件，有才重读应用列表。
+     *
+     * 为什么必须"先 peek、有事件才 refreshApps"：`listApps` 要跨 Binder 拉容器
+     * 包列表，属于重 IO，不能每几秒全量跑一次。而 `peekInstallEvents` 只读一个
+     * 文件、不清空，发现本空间有新事件后才走 [refreshApps]（它会消费事件 +
+     * 重读列表），把开销限制在"真的有新安装"的时刻。
+     */
+    fun pollInstallEvents() {
+        val id = _currentSpaceId.value ?: return
+        viewModelScope.launch {
+            val hasNew = runCatching {
+                withContext(Dispatchers.IO) { engine.peekInstallEvents().any { it.spaceId == id } }
+            }.getOrDefault(false)
+            if (hasNew) refreshApps()
+        }
     }
 
     fun launchApp(packageName: String) {

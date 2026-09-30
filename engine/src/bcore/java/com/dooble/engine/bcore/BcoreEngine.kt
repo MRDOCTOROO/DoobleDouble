@@ -408,6 +408,30 @@ class BcoreEngine private constructor() : VirtualEngine {
         }
     }
 
+    /**
+     * 只读快照安装事件，**不清空**日志。
+     *
+     * UI 用它在空间详情页做轻量轮询：详情页常驻时，商店在后台装完应用，
+     * 这个调用能发现新事件并触发真正的 [listApps] 刷新，不用等用户退出再进。
+     * 与 [drainInstallEvents] 共用同一份 userId → 空间 id 映射逻辑。
+     */
+    override fun peekInstallEvents(): List<SpaceInstallEvent> {
+        val byUserId = store.all()
+            .filter { it.bcoreUserId > 0 }
+            .associate { it.bcoreUserId to it.config.id }
+
+        return InstallEventLog.peek().map { e ->
+            SpaceInstallEvent(
+                spaceId = byUserId[e.userId].orEmpty(),
+                packageName = e.packageName,
+                label = e.label.ifBlank { e.packageName },
+                ok = e.ok,
+                message = e.message,
+                timestamp = e.timestamp,
+            )
+        }
+    }
+
     // ------------------------------------------------------------ 签名伪造验收
 
     /**

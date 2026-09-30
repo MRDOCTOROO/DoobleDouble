@@ -140,6 +140,18 @@ interface VirtualEngine {
      * 默认实现返回空——降级引擎没有容器，也就没有这条路径。
      */
     fun drainInstallEvents(): List<SpaceInstallEvent> = emptyList()
+
+    /**
+     * **只读**快照当前「容器内应用自己发起的安装」事件，**不清空**日志。
+     *
+     * 与 [drainInstallEvents] 的分工：UI 在空间详情页常驻时用这个做轻量轮询——
+     * 只读文件、不消费事件，发现本空间有新事件才调用 [drainInstallEvents] +
+     * [listApps] 去真正刷新桌面。这样商店在后台装完应用时，宿主详情页不用
+     * 等用户退出再进入就能自动把新应用摆上「容器桌面」。
+     *
+     * 默认实现返回空——降级引擎没有容器，也就没有这条路径。
+     */
+    fun peekInstallEvents(): List<SpaceInstallEvent> = emptyList()
 }
 
 /**

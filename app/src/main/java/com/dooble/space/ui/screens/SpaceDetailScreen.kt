@@ -32,6 +32,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -91,12 +92,22 @@ import com.dooble.space.ui.theme.MorandiSage
 import com.dooble.space.ui.theme.Success
 import com.dooble.space.ui.theme.Warning
 import com.dooble.space.ui.theme.accentOf
+import kotlinx.coroutines.delay
 
 /** 当前供给的商店包名 */
 private const val STORE_PACKAGE = StoreProvisioner.PRIMARY_PACKAGE
 
 /** 桌面网格列数 */
 private const val DESKTOP_COLUMNS = 4
+
+/**
+ * 容器内安装事件轮询间隔。
+ *
+ * 详情页常驻时每隔这么久读一次安装事件日志。间隔太短会频繁唤醒 IO，
+ * 太长则商店装完应用后桌面更新有明显延迟。4 秒是"用户刚装完切回来
+ * 大概率已经能看到"的合理折中。
+ */
+private const val INSTALL_POLL_INTERVAL_MS = 4_000L
 
 @Composable
 fun SpaceDetailScreen(
@@ -149,6 +160,16 @@ fun SpaceDetailScreen(
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // 详情页常驻时轻量轮询容器内安装事件：用户在空间里打开商店装完应用，
+    // 不用退出详情页，新应用也会自动摆上「容器桌面」。
+    // 轮询本身只读事件日志（peek），有本空间的新事件才重读应用列表。
+    LaunchedEffect(spaceId) {
+        while (true) {
+            delay(INSTALL_POLL_INTERVAL_MS)
+            vm.pollInstallEvents()
+        }
     }
 
     if (showHostImport) {

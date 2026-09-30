@@ -7,23 +7,26 @@ F-Droid 的 DownloaderService 继承 androidx.core.app.JobIntentService，
 ClassCastException，任务被丢弃，下载永远停在「正在等待开始下载」。
 
 AppJobServiceDispatcher.onStartJob 增加回退：JobService 创建失败时，
-把目标服务按普通 Service 实例化、attach、onCreate、onBind(null)，
-拿到 JobIntentService 的 JobServiceEngine binder（隐藏接口
-android.app.job.IJobService），反射调用 onStartJob(params)，
-让 JobIntentService 从 JobParameters extras 里读 work intent 并执行。
+把目标服务按普通 Service 实例化、attach、onCreate，再反射
+JobIntentService 的 mJobImpl 字段拿到 JobServiceEngine 对象，调用
+公开方法 JobServiceEngine.onStartJob(params) 让 JobIntentService 从
+JobParameters extras 里读 work intent 并执行。
+
+为什么不能走 onBind 返回的 binder：那是 @hide 接口 IJobService 的实现，
+Android 9+ 的 hidden API 拦截会让反射 getMethod("onStartJob", ...) 抛
+NoSuchMethodException（实测 Android 15 上正是如此）。
 
 diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/app/dispatcher/AppJobServiceDispatcher.java b/Bcore/src/main/java/top/niunaijun/blackbox/app/dispatcher/AppJobServiceDispatcher.java
-index d31c56e..f1afa10 100644
+index d31c56e..76eca0b 100644
 --- a/Bcore/src/main/java/top/niunaijun/blackbox/app/dispatcher/AppJobServiceDispatcher.java
 +++ b/Bcore/src/main/java/top/niunaijun/blackbox/app/dispatcher/AppJobServiceDispatcher.java
-@@ -1,18 +1,23 @@
+@@ -1,18 +1,22 @@
  package top.niunaijun.blackbox.app.dispatcher;
  
 +import android.app.Service;
  import android.app.job.JobParameters;
  import android.app.job.JobService;
  import android.content.res.Configuration;
-+import android.os.IBinder;
  
 +import java.lang.reflect.Method;
  import java.util.HashMap;
@@ -40,7 +43,7 @@ index d31c56e..f1afa10 100644
      private static final AppJobServiceDispatcher sServiceDispatcher = new AppJobServiceDispatcher();
      private final Map<Integer, JobRecord> mJobRecords = new HashMap<>();
  
-@@ -23,19 +28,24 @@ public class AppJobServiceDispatcher {
+@@ -23,19 +27,24 @@ public class AppJobServiceDispatcher {
      public boolean onStartJob(JobParameters params) {
          try {
              JobService jobService = getJobService(params.getJobId());
@@ -72,7 +75,7 @@ index d31c56e..f1afa10 100644
          boolean b = jobService.onStopJob(params);
          jobService.onDestroy();
          synchronized (mJobRecords) {
-@@ -85,8 +95,9 @@ public class AppJobServiceDispatcher {
+@@ -85,8 +94,9 @@ public class AppJobServiceDispatcher {
              try {
                  JobRecord record = BlackBoxCore.getBJobManager().queryJobRecord(BlackBoxCore.getAppProcessName(), jobId);
                  record.mJobService = BlackBoxCore.currentActivityThread().createJobService(record.mServiceInfo);
@@ -83,7 +86,7 @@ index d31c56e..f1afa10 100644
                  mJobRecords.put(jobId, record);
                  return record.mJobService;
              } catch (Throwable t) {
-@@ -95,4 +106,46 @@ public class AppJobServiceDispatcher {
+@@ -95,4 +105,84 @@ public class AppJobServiceDispatcher {
              return null;
          }
      }
@@ -92,10 +95,17 @@ index d31c56e..f1afa10 100644
 +    /**
 +     * JobIntentService 回退路径。
 +     *
-+     * <p>JobIntentService 的 onBind 返回隐藏接口 android.app.job.IJobService 的
-+     * binder（JobServiceEngine）。容器把服务实例化、attach、onCreate、onBind 之后，
-+     * 用反射拿到 IJobService，再调 onStartJob(params)——JobIntentService 会从
-+     * params 的 extras 里取出 work intent 并执行，这样 F-Droid 的下载任务就能跑了。
++     * <p>JobIntentService 用 {@link android.app.job.JobServiceEngine} 作为 job 引擎，
++     * 但它的 onBind 返回的 binder 是 @hide 接口 android.app.job.IJobService 的实现——
++     * Android 9+ 的 hidden API 拦截会让反射 getMethod("onStartJob", ...) 直接抛
++     * NoSuchMethodException，所以不能走 binder 反射。
++     *
++     * <p>正确做法：容器把服务实例化、attach、onCreate 之后，直接反射
++     * JobIntentService 的 mJobImpl 字段（androidx.core 的 app 级类，不受 hidden API
++     * 限制）拿到 JobServiceEngine 对象，再调公开类 JobServiceEngine 的公开方法
++     * onStartJob(params)——虚分派会落到 JobServiceEngineImpl.onStartJob，
++     * JobIntentService 从 JobParameters 的 extras 里读出 work intent 并执行，
++     * F-Droid 的下载任务就能跑了。
 +     */
 +    private boolean startJobServiceCompat(JobParameters params) {
 +        JobRecord record = null;
@@ -113,16 +123,47 @@ index d31c56e..f1afa10 100644
 +                Slog.w(TAG, "JobIntentService fallback: cannot create " + record.mServiceInfo.name);
 +                return false;
 +            }
-+            IBinder binder = service.onBind(null);
-+            if (binder == null) {
-+                Slog.w(TAG, "JobIntentService fallback: onBind returned null for " + record.mServiceInfo.name);
++            // JobIntentService 的 onBind 只有在 mJobImpl 非空时才返回 binder，
++            // 而 binder 是 @hide 接口 IJobService 的实现（Android 9+ hidden API
++            // 拦截会让反射 getMethod("onStartJob", ...) 直接抛 NoSuchMethodException）。
++            // 所以这里不走 binder，而是直接拿 JobIntentService 内部的
++            // JobServiceEngine 对象（androidx.core 的 mJobImpl 字段，app 级类，
++            // 反射不受 hidden API 限制），再调公开类 JobServiceEngine 的
++            // onStartJob(JobParameters)（SDK 公开方法，同样不受 hidden API 拦截）。
++            Object engine = null;
++            try {
++                Class<?> c = service.getClass();
++                java.lang.reflect.Field f = null;
++                while (c != null) {
++                    try {
++                        f = c.getDeclaredField("mJobImpl");
++                        break;
++                    } catch (NoSuchFieldException ignore) {
++                        c = c.getSuperclass();
++                    }
++                }
++                if (f == null) {
++                    Slog.w(TAG, "JobIntentService fallback: no mJobImpl field on " + service.getClass().getName());
++                    return false;
++                }
++                f.setAccessible(true);
++                engine = f.get(service);
++            } catch (Throwable t1) {
++                Slog.w(TAG, "JobIntentService fallback: cannot read mJobImpl from "
++                        + service.getClass().getName(), t1);
 +                return false;
 +            }
-+            Class<?> stubClass = Class.forName("android.app.job.IJobService$Stub");
-+            Method asInterface = stubClass.getMethod("asInterface", IBinder.class);
-+            Object iJobService = asInterface.invoke(null, binder);
-+            Method onStartJob = iJobService.getClass().getMethod("onStartJob", JobParameters.class);
-+            Object result = onStartJob.invoke(iJobService, params);
++            if (engine == null) {
++                Slog.w(TAG, "JobIntentService fallback: mJobImpl is null for " + record.mServiceInfo.name);
++                return false;
++            }
++
++            // JobServiceEngine 是公开类，onStartJob 是公开抽象方法。
++            // 反射调用会按虚分派落到 JobServiceEngineImpl.onStartJob。
++            Method onStartJob = Class.forName("android.app.job.JobServiceEngine")
++                    .getMethod("onStartJob", JobParameters.class);
++            Object result = onStartJob.invoke(engine, params);
++            Slog.d(TAG, "JobIntentService fallback: onStartJob(" + params.getJobId() + ") -> " + result);
 +            return result instanceof Boolean ? (Boolean) result : false;
 +        } catch (Throwable t) {
 +            Slog.w(TAG, "JobIntentService fallback failed for job " + params.getJobId()
