@@ -1,0 +1,485 @@
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/core/system/BProcessManagerService.java b/Bcore/src/main/java/top/niunaijun/blackbox/core/system/BProcessManagerService.java
+index b699bcb..5a227bd 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/core/system/BProcessManagerService.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/core/system/BProcessManagerService.java
+@@ -129,6 +129,53 @@ public class BProcessManagerService implements ISystemService {
+         }
+     }
+ 
++    /**
++     * [Dooble] 只登记 ProcessRecord 并分配 bpid 槽位,**不 fork、不等待进程起来**。
++     *
++     * 供 BJobManagerService.schedule 使用:虚拟应用在 Binder 调用里请求调度 Job 时,
++     * 原实现走 startProcessLocked 同步 fork —— 调用方(虚拟应用主线程)会被阻塞
++     * 数秒甚至永久( Zygote 往返 + bindApplication),Aurora 首次点安装整个 UI
++     * 冻结的根因。改为:调度期仅登记;真正拉起发生在代理 Job 触发时 —— 宿主
++     * JobScheduler 启动 :pN 进程后,AppJobServiceDispatcher 经 bindApplication
++     * 按需挂载虚拟应用(createJobService 已支持该路径)。
++     *
++     * 注意:若该槽位随后被真实 fork 复用,startProcessLocked 会按 processName
++     * 覆盖记录,JobRecord 以 (processName, jobId) 为键仍可命中;极端情况下滑
++     * 槽位被其他应用占用时,该 Job 在派发期查不到记录会被宿主按退避重试。
++     */
++    public ProcessRecord allocateProcessRecord(String packageName, String processName, int userId) {
++        ApplicationInfo info = BPackageManagerService.get().getApplicationInfo(packageName, 0, userId);
++        if (info == null)
++            return null;
++        int buid = BUserHandle.getUid(userId, BPackageManagerService.get().getAppId(packageName));
++        synchronized (mProcessLock) {
++            Map<String, ProcessRecord> bProcess = mProcessMap.get(buid);
++            if (bProcess != null) {
++                ProcessRecord existing = bProcess.get(processName);
++                if (existing != null && existing.bpid >= 0) {
++                    return existing;
++                }
++            }
++            int bpid = getUsingBPidL();
++            if (bpid == -1) {
++                return null;
++            }
++            ProcessRecord app = new ProcessRecord(info, processName);
++            app.uid = Process.myUid();
++            app.bpid = bpid;
++            app.buid = BPackageManagerService.get().getAppId(packageName);
++            app.userId = userId;
++            if (bProcess == null) {
++                bProcess = new HashMap<>();
++            }
++            bProcess.put(processName, app);
++            synchronized (mProcessMap) {
++                mProcessMap.put(buid, bProcess);
++            }
++            return app;
++        }
++    }
++
+     private int parseBPid(String stubProcessName) {
+         String prefix;
+         if (stubProcessName == null) {
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/core/system/am/BJobManagerService.java b/Bcore/src/main/java/top/niunaijun/blackbox/core/system/am/BJobManagerService.java
+index ef0115d..bda2114 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/core/system/am/BJobManagerService.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/core/system/am/BJobManagerService.java
+@@ -3,10 +3,10 @@ package top.niunaijun.blackbox.core.system.am;
+ import android.app.job.JobInfo;
+ import android.content.ComponentName;
+ import android.content.Intent;
++import android.content.pm.ApplicationInfo;
+ import android.content.pm.PackageManager;
+ import android.content.pm.ResolveInfo;
+ import android.content.pm.ServiceInfo;
+-import android.os.Binder;
+ import android.os.RemoteException;
+ import android.text.TextUtils;
+ 
+@@ -39,17 +39,37 @@ public class BJobManagerService extends IBJobManagerService.Stub implements ISys
+         Intent intent = new Intent();
+         intent.setComponent(componentName);
+         ResolveInfo resolveInfo = BPackageManagerService.get().resolveService(intent, PackageManager.GET_META_DATA, null, userId);
+-        if (resolveInfo == null) {
+-            return info;
++        ServiceInfo serviceInfo;
++        if (resolveInfo != null) {
++            serviceInfo = resolveInfo.serviceInfo;
++        } else {
++            // [Dooble] 兜底:显式组件解析不到时,用 JobInfo 自带组件构造 ServiceInfo。
++            // 原实现直接 return info —— 组件未改写,宿主 JobScheduler 必然以
++            // "Tried to schedule job for non-existent component" 拒绝,
++            // WorkManager 的任务(商店下载、microG checkin)永远无法入队。
++            // (实测:Aurora 点安装后系统按原组件拒绝,详见 bcore-patch 0006。)
++            ApplicationInfo appInfo = BPackageManagerService.get().getApplicationInfo(
++                    componentName.getPackageName(), 0, userId);
++            if (appInfo == null) {
++                return null;
++            }
++            serviceInfo = new ServiceInfo();
++            serviceInfo.packageName = componentName.getPackageName();
++            serviceInfo.name = componentName.getClassName();
++            serviceInfo.processName = componentName.getPackageName();
++            serviceInfo.applicationInfo = appInfo;
+         }
+-        ServiceInfo serviceInfo = resolveInfo.serviceInfo;
+         ProcessRecord processRecord = BProcessManagerService.get().findProcessRecord(serviceInfo.packageName, serviceInfo.processName, userId);
+         if (processRecord == null) {
+-            processRecord = BProcessManagerService.get().
+-                    startProcessLocked(serviceInfo.packageName, serviceInfo.processName, userId, -1, Binder.getCallingPid());
++            // [Dooble] 不再在 Binder 调用里同步 fork 虚拟进程:原实现的
++            // startProcessLocked 会在调用方(虚拟应用主线程)上阻塞数秒,
++            // Aurora 首次点安装整个 UI 冻结的根因。这里只登记 ProcessRecord
++            // 并分配 bpid 槽位;真正拉起发生在代理 Job 触发时 —— 宿主启动
++            // :pN 进程后,dispatcher 走 bindApplication 按需挂载虚拟应用。
++            processRecord = BProcessManagerService.get().allocateProcessRecord(
++                    serviceInfo.packageName, serviceInfo.processName, userId);
+             if (processRecord == null) {
+-                throw new RuntimeException(
+-                        "Unable to create Process " + serviceInfo.processName);
++                return null;
+             }
+         }
+         return scheduleJob(processRecord, info, serviceInfo);
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IJobServiceProxy.java b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IJobServiceProxy.java
+index 71cc2cc..bb7771c 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IJobServiceProxy.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IJobServiceProxy.java
+@@ -14,7 +14,6 @@ import top.niunaijun.blackbox.fake.hook.BinderInvocationStub;
+ import top.niunaijun.blackbox.fake.hook.MethodHook;
+ import top.niunaijun.blackbox.fake.hook.ProxyMethod;
+ import top.niunaijun.blackbox.utils.Slog;
+-import top.niunaijun.blackbox.utils.UIDSpoofingHelper;
+ 
+ 
+ public class IJobServiceProxy extends BinderInvocationStub {
+@@ -35,144 +34,67 @@ public class IJobServiceProxy extends BinderInvocationStub {
+         replaceSystemService(Context.JOB_SCHEDULER_SERVICE);
+     }
+ 
+-    @ProxyMethod("schedule")
+-    public static class Schedule extends MethodHook {
+-        @Override
+-        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+-            try {
+-                
+-                if (args == null || args.length == 0) {
+-                    Slog.w(TAG, "Schedule: No arguments provided, returning RESULT_FAILURE");
+-                    return 0; 
+-                }
+-                
+-                if (args[0] == null) {
+-                    Slog.w(TAG, "Schedule: args[0] is null, returning RESULT_FAILURE");
+-                    return 0; 
+-                }
+-                
+-                if (!(args[0] instanceof JobInfo)) {
+-                    Slog.w(TAG, "Schedule: args[0] is not JobInfo: " + args[0].getClass().getSimpleName());
+-                    
+-                    return handleNonJobInfoSchedule(who, method, args);
+-                }
+-                
+-                JobInfo jobInfo = (JobInfo) args[0];
+-                Slog.d(TAG, "Schedule: Processing JobInfo for package: " + jobInfo.getService().getPackageName());
+-                
+-                
+-                try {
+-                    JobInfo proxyJobInfo = BlackBoxCore.getBJobManager().schedule(jobInfo);
+-                    if (proxyJobInfo != null) {
+-                        args[0] = proxyJobInfo;
+-                        Slog.d(TAG, "Schedule: Successfully created proxy JobInfo");
+-                        return method.invoke(who, args);
+-                    }
+-                } catch (Exception e) {
+-                    Slog.w(TAG, "Schedule: BlackBox job manager failed, trying system fallback", e);
+-                }
+-                
+-                
+-                return scheduleWithUIDSpoofing(who, method, args, jobInfo);
+-                
+-            } catch (Exception e) {
+-                Slog.e(TAG, "Schedule: Error processing job", e);
+-                
+-                
+-                if (isUIDValidationError(e)) {
+-                    Slog.w(TAG, "UID validation failed for job scheduling, returning RESULT_FAILURE: " + e.getCause().getMessage());
+-                    return 0; 
+-                }
+-                
+-                
+-                try {
+-                    return method.invoke(who, args);
+-                } catch (Exception fallbackException) {
+-                    Slog.e(TAG, "Schedule: Fallback also failed", fallbackException);
+-                    return 0; 
+-                }
+-            }
++    /**
++     * [Dooble] schedule/enqueue 拦截的统一实现(重写,见 bcore-patch 0006):
++     *
++     *  1. 原实现只认 {@code args[0] instanceof JobInfo},其余原样透传。API 34+
++     *     上 WorkManager 2.10 经 {@code forNamespace("androidx.work.systemjobscheduler")}
++     *     的 namespaced 重载调度,首个参数是 String 命名空间、JobInfo 在后续
++     *     参数里 —— 原样透传让宿主 JobScheduler 按虚拟组件校验,必然被拒
++     *     ("Tried to schedule job for non-existent component"),商店下载与
++     *     microG checkin 的任务因此永远无法入队。现在在**任意参数位置**找
++     *     JobInfo 并改写。
++     *  2. 原实现失败后回退 method.invoke,再撞一次同样的拒绝。现在失败直接
++     *     返回 RESULT_FAILURE(0),WorkManager 会保留任务并按退避重试。
++     *  3. 组件改写与进程登记在服务端(BJobManagerService.schedule)完成;
++     *     返回 null 表示虚拟包不存在,这里如实返回 RESULT_FAILURE。
++     */
++    static int handleJobScheduling(Object who, Method method, Object[] args, String op) {
++        int jobInfoIndex = findJobInfoIndex(args);
++        if (jobInfoIndex < 0) {
++            // 没有 JobInfo 参与的调用与容器无关,原样放行
++            return invokeQuietly(who, method, args, op);
+         }
+-        
+-        
+-        private Object handleNonJobInfoSchedule(Object who, Method method, Object[] args) throws Throwable {
+-            try {
+-                
+-                if (args[0] instanceof String) {
+-                    String workId = (String) args[0];
+-                    Slog.d(TAG, "Schedule: Handling WorkManager string ID: " + workId);
+-                    
+-                    
+-                    JobInfo minimalJobInfo = createMinimalJobInfo(workId);
+-                    if (minimalJobInfo != null) {
+-                        args[0] = minimalJobInfo;
+-                        return method.invoke(who, args);
+-                    }
+-                }
+-                
+-                
+-                return method.invoke(who, args);
+-            } catch (Exception e) {
+-                Slog.w(TAG, "Schedule: Failed to handle non-JobInfo schedule", e);
+-                return 0; 
++        JobInfo jobInfo = (JobInfo) args[jobInfoIndex];
++        Slog.d(TAG, op + ": Processing JobInfo for package: " + jobInfo.getService().getPackageName());
++        try {
++            JobInfo proxyJobInfo = BlackBoxCore.getBJobManager().schedule(jobInfo);
++            if (proxyJobInfo == null) {
++                Slog.w(TAG, op + ": job manager returned null (virtual package missing?), returning RESULT_FAILURE");
++                return 0;
+             }
++            args[jobInfoIndex] = proxyJobInfo;
++            Slog.d(TAG, op + ": Successfully created proxy JobInfo");
++            return invokeQuietly(who, method, args, op);
++        } catch (Throwable t) {
++            Slog.w(TAG, op + ": BlackBox job manager failed, returning RESULT_FAILURE", t);
++            return 0;
+         }
+-        
+-        
+-        private Object scheduleWithUIDSpoofing(Object who, Method method, Object[] args, JobInfo jobInfo) throws Throwable {
+-            try {
+-                
+-                String targetPackage = jobInfo.getService().getPackageName();
+-                Slog.d(TAG, "Schedule: Attempting UID spoofing for package: " + targetPackage);
+-                
+-                
+-                UIDSpoofingHelper.logUIDInfo("job_schedule", targetPackage);
+-                
+-                
+-                if (UIDSpoofingHelper.needsUIDSpoofing("job_schedule", targetPackage)) {
+-                    Slog.d(TAG, "Schedule: UID spoofing needed, attempting to bypass validation");
+-                    
+-                    
+-                    
+-                    Slog.w(TAG, "Schedule: UID spoofing not fully implemented, returning RESULT_FAILURE");
+-                    return 0; 
+-                } else {
+-                    Slog.d(TAG, "Schedule: No UID spoofing needed, proceeding normally");
+-                    return method.invoke(who, args);
+-                }
+-                
+-            } catch (Exception e) {
+-                Slog.w(TAG, "Schedule: UID spoofing failed", e);
+-                return 0; 
+-            }
++    }
++
++    private static int invokeQuietly(Object who, Method method, Object[] args, String op) {
++        try {
++            Object result = method.invoke(who, args);
++            return result instanceof Integer ? (Integer) result : 0;
++        } catch (Throwable t) {
++            Slog.w(TAG, op + ": system call failed, returning RESULT_FAILURE", t);
++            return 0;
+         }
+-        
+-        
+-        private JobInfo createMinimalJobInfo(String workId) {
+-            try {
+-                
+-                
+-                Slog.d(TAG, "Schedule: Creating minimal JobInfo for work ID: " + workId);
+-                return null; 
+-            } catch (Exception e) {
+-                Slog.w(TAG, "Schedule: Failed to create minimal JobInfo", e);
+-                return null;
+-            }
++    }
++
++    static int findJobInfoIndex(Object[] args) {
++        if (args == null) return -1;
++        for (int i = 0; i < args.length; i++) {
++            if (args[i] instanceof JobInfo) return i;
+         }
+-        
+-        
+-        private boolean isUIDValidationError(Exception e) {
+-            if (e.getCause() instanceof IllegalArgumentException) {
+-                String message = e.getCause().getMessage();
+-                return message != null && message.contains("cannot schedule job");
+-            }
+-            
+-            if (e.getCause() instanceof android.os.RemoteException) {
+-                String message = e.getCause().getMessage();
+-                return message != null && message.contains("cannot schedule job");
+-            }
+-            
+-            return false;
++        return -1;
++    }
++
++    @ProxyMethod("schedule")
++    public static class Schedule extends MethodHook {
++        @Override
++        protected Object hook(Object who, Method method, Object[] args) {
++            return handleJobScheduling(who, method, args, "Schedule");
+         }
+     }
+ 
+@@ -186,7 +108,7 @@ public class IJobServiceProxy extends BinderInvocationStub {
+                     Slog.w(TAG, "Cancel: JobId is null");
+                     return method.invoke(who, args);
+                 }
+-                
++
+                 args[0] = BlackBoxCore.getBJobManager()
+                         .cancel(BActivityThread.getAppConfig().processName, jobId);
+                 return method.invoke(who, args);
+@@ -214,141 +136,8 @@ public class IJobServiceProxy extends BinderInvocationStub {
+     @ProxyMethod("enqueue")
+     public static class Enqueue extends MethodHook {
+         @Override
+-        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+-            try {
+-                
+-                if (args == null || args.length == 0) {
+-                    Slog.w(TAG, "Enqueue: No arguments provided, returning RESULT_FAILURE");
+-                    return 0; 
+-                }
+-                
+-                if (args[0] == null) {
+-                    Slog.w(TAG, "Enqueue: args[0] is null, returning RESULT_FAILURE");
+-                    return 0; 
+-                }
+-                
+-                if (!(args[0] instanceof JobInfo)) {
+-                    Slog.w(TAG, "Enqueue: args[0] is not JobInfo: " + args[0].getClass().getSimpleName());
+-                    
+-                    return handleNonJobInfoEnqueue(who, method, args);
+-                }
+-                
+-                JobInfo jobInfo = (JobInfo) args[0];
+-                Slog.d(TAG, "Enqueue: Processing JobInfo for package: " + jobInfo.getService().getPackageName());
+-                
+-                
+-                try {
+-                    JobInfo proxyJobInfo = BlackBoxCore.getBJobManager().schedule(jobInfo);
+-                    if (proxyJobInfo != null) {
+-                        args[0] = proxyJobInfo;
+-                        Slog.d(TAG, "Enqueue: Successfully created proxy JobInfo");
+-                        return method.invoke(who, args);
+-                    }
+-                } catch (Exception e) {
+-                    Slog.w(TAG, "Enqueue: BlackBox job manager failed, trying system fallback", e);
+-                }
+-                
+-                
+-                return enqueueWithUIDSpoofing(who, method, args, jobInfo);
+-                
+-            } catch (Exception e) {
+-                Slog.e(TAG, "Enqueue: Error processing job", e);
+-                
+-                
+-                if (isUIDValidationError(e)) {
+-                    Slog.w(TAG, "UID validation failed for job enqueuing, returning RESULT_FAILURE: " + e.getCause().getMessage());
+-                    return 0; 
+-                }
+-                
+-                
+-                try {
+-                    return method.invoke(who, args);
+-                } catch (Exception fallbackException) {
+-                    Slog.e(TAG, "Enqueue: Fallback also failed", fallbackException);
+-                    return 0; 
+-                }
+-            }
+-        }
+-        
+-        
+-        private Object handleNonJobInfoEnqueue(Object who, Method method, Object[] args) throws Throwable {
+-            try {
+-                
+-                if (args[0] instanceof String) {
+-                    String workId = (String) args[0];
+-                    Slog.d(TAG, "Enqueue: Handling WorkManager string ID: " + workId);
+-                    
+-                    
+-                    JobInfo minimalJobInfo = createMinimalJobInfo(workId);
+-                    if (minimalJobInfo != null) {
+-                        args[0] = minimalJobInfo;
+-                        return method.invoke(who, args);
+-                    }
+-                }
+-                
+-                
+-                return method.invoke(who, args);
+-            } catch (Exception e) {
+-                Slog.w(TAG, "Enqueue: Failed to handle non-JobInfo enqueue", e);
+-                return 0; 
+-            }
+-        }
+-        
+-        
+-        private Object enqueueWithUIDSpoofing(Object who, Method method, Object[] args, JobInfo jobInfo) throws Throwable {
+-            try {
+-                
+-                String targetPackage = jobInfo.getService().getPackageName();
+-                Slog.d(TAG, "Enqueue: Attempting UID spoofing for package: " + targetPackage);
+-                
+-                
+-                UIDSpoofingHelper.logUIDInfo("job_enqueue", targetPackage);
+-                
+-                
+-                if (UIDSpoofingHelper.needsUIDSpoofing("job_enqueue", targetPackage)) {
+-                    Slog.d(TAG, "Enqueue: UID spoofing needed, attempting to bypass validation");
+-                    
+-                    
+-                    
+-                    Slog.w(TAG, "Enqueue: UID spoofing not fully implemented, returning RESULT_FAILURE");
+-                    return 0; 
+-                } else {
+-                    Slog.d(TAG, "Enqueue: No UID spoofing needed, proceeding normally");
+-                    return method.invoke(who, args);
+-                }
+-                
+-            } catch (Exception e) {
+-                Slog.w(TAG, "Enqueue: UID spoofing failed", e);
+-                return 0; 
+-            }
+-        }
+-        
+-        
+-        private JobInfo createMinimalJobInfo(String workId) {
+-            try {
+-                
+-                
+-                Slog.d(TAG, "Enqueue: Creating minimal JobInfo for work ID: " + workId);
+-                return null; 
+-            } catch (Exception e) {
+-                Slog.w(TAG, "Enqueue: Failed to create minimal JobInfo", e);
+-                return null;
+-            }
+-        }
+-        
+-        
+-        private boolean isUIDValidationError(Exception e) {
+-            if (e.getCause() instanceof IllegalArgumentException) {
+-                String message = e.getCause().getMessage();
+-                return message != null && message.contains("cannot schedule job");
+-            }
+-            
+-            if (e.getCause() instanceof android.os.RemoteException) {
+-                String message = e.getCause().getMessage();
+-                return message != null && message.contains("cannot schedule job");
+-            }
+-            
+-            return false;
++        protected Object hook(Object who, Method method, Object[] args) {
++            return handleJobScheduling(who, method, args, "Enqueue");
+         }
+     }
+ 

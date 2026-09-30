@@ -1,0 +1,100 @@
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/fake/hook/HookManager.java b/Bcore/src/main/java/top/niunaijun/blackbox/fake/hook/HookManager.java
+index 3701fe5..91bef8c 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/fake/hook/HookManager.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/hook/HookManager.java
+@@ -28,6 +28,7 @@ import top.niunaijun.blackbox.fake.service.IXiaomiAttributionSourceProxy;
+ import top.niunaijun.blackbox.fake.service.IXiaomiSettingsProxy;
+ import top.niunaijun.blackbox.fake.service.IXiaomiMiuiServicesProxy;
+ import top.niunaijun.blackbox.fake.service.IDnsResolverProxy;
++import top.niunaijun.blackbox.fake.service.IDomainVerificationManagerProxy;
+ import top.niunaijun.blackbox.fake.service.IContextHubServiceProxy;
+ import top.niunaijun.blackbox.fake.service.IDeviceIdentifiersPolicyProxy;
+ import top.niunaijun.blackbox.fake.service.IDevicePolicyManagerProxy;
+@@ -154,6 +155,7 @@ public class HookManager {
+             addInjector(new NetworkPermissionCompat());
+             addInjector(new IConnectivityManagerProxy());
+             addInjector(new IDnsResolverProxy());
++            addInjector(new IDomainVerificationManagerProxy());
+                     addInjector(new IAttributionSourceProxy());
+         addInjector(new IContentProviderProxy());
+         addInjector(new ISettingsSystemProxy());
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IDomainVerificationManagerProxy.java b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IDomainVerificationManagerProxy.java
+new file mode 100644
+index 0000000..50aa791
+--- /dev/null
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IDomainVerificationManagerProxy.java
+@@ -0,0 +1,74 @@
++package top.niunaijun.blackbox.fake.service;
++
++import android.os.IBinder;
++
++import java.lang.reflect.Method;
++
++import black.android.os.BRServiceManager;
++import top.niunaijun.blackbox.BlackBoxCore;
++import top.niunaijun.blackbox.fake.hook.BinderInvocationStub;
++import top.niunaijun.blackbox.fake.hook.MethodHook;
++import top.niunaijun.blackbox.fake.hook.ProxyMethod;
++import top.niunaijun.blackbox.utils.Slog;
++
++/**
++ * domain_verification 服务的代理。
++ *
++ * 为什么必须代理它：域名验证状态由这个服务按包名直接查宿主的 PackageManagerService，
++ * 而虚拟包在宿主侧根本不存在，于是抛 NameNotFoundException。这个异常不在
++ * IPackageManager 这条链上（Android 12 起 DomainVerificationManager 走的是独立的
++ * IDomainVerificationManager 服务），所以容器的 PM 钩子拦不到它。
++ *
++ * 表现：Aurora Store 点「安装」时整段逻辑被这个异常打断，按钮看起来毫无反应。
++ *
++ * 做法：把查询的包名换成宿主自身。调用方拿到的是一份合法但为空的链接状态，
++ * 逻辑得以继续；对真正的链接处理没有影响，因为容器内应用本来也不参与宿主的
++ * 默认链接归属。
++ */
++public class IDomainVerificationManagerProxy extends BinderInvocationStub {
++    public static final String TAG = "DomainVerificationStub";
++    public static final String SERVICE_NAME = "domain_verification";
++
++    public IDomainVerificationManagerProxy() {
++        super(BRServiceManager.get().getService(SERVICE_NAME));
++    }
++
++    @Override
++    protected Object getWho() {
++        IBinder serviceBinder = BRServiceManager.get().getService(SERVICE_NAME);
++        if (serviceBinder == null) {
++            return null;
++        }
++        try {
++            Class<?> stub = Class.forName(
++                    "android.content.pm.verify.domain.IDomainVerificationManager$Stub");
++            return stub.getMethod("asInterface", IBinder.class).invoke(null, serviceBinder);
++        } catch (Throwable t) {
++            Slog.w(TAG, "asInterface failed: " + t);
++            return null;
++        }
++    }
++
++    @Override
++    protected void inject(Object baseInvocation, Object proxyInvocation) {
++        replaceSystemService(SERVICE_NAME);
++    }
++
++    @Override
++    public boolean isBadEnv() {
++        return false;
++    }
++
++    @ProxyMethod("getDomainVerificationUserState")
++    public static class GetDomainVerificationUserState extends MethodHook {
++        @Override
++        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
++            if (args != null && args.length > 0 && args[0] instanceof String) {
++                Slog.d(TAG, "getDomainVerificationUserState: " + args[0]
++                        + " -> " + BlackBoxCore.getHostPkg());
++                args[0] = BlackBoxCore.getHostPkg();
++            }
++            return method.invoke(who, args);
++        }
++    }
++}
