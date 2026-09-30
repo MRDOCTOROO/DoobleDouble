@@ -231,9 +231,17 @@ object NetworkProbe {
         }
 
         return when (verdict) {
-            Verdict.OK ->
+            Verdict.OK -> {
+                val proxyNote =
+                    // 连接走 HTTP 代理时，解析由代理端完成，本地污染不构成问题；
+                    // 不说明的话"能登录"和上面的"⚠️ 污染"会自相矛盾
+                    if (poisoned)
+                        "\n（说明：本地 DNS 解析不像 Google 的地址，但连接实测正常——" +
+                            "若已配置系统代理，域名由代理端解析，本地污染不影响使用。）"
+                    else ""
                 "国内外站点都可达，microG 登录要用的 checkin 端点也通。" +
-                    "可以正常登录 Google 账号。$dnsLine"
+                    "可以正常登录 Google 账号。" + dnsLine + proxyNote
+            }
 
             Verdict.CHECKIN_BLOCKED ->
                 "**Google 能连，但 microG 登录要用的端点连不上** —— 这正是" +

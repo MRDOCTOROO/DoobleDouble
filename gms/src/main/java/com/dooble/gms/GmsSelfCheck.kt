@@ -192,24 +192,38 @@ class GmsSelfCheck(
                 )
             }
 
-            MicroGComponent.REQUIRED.forEach { comp ->
-                val result = spoof.verifyDetailed(spaceId, comp.packageName)
+            if (cert == null) {
+                // 证书未就绪时没有可下发的签名，端到端验证必然 FAIL——
+                // 那不是引擎问题，是配置没完成。而且每次 verifyDetailed 都要
+                // 对容器做一次全量包查询（实测在模拟器上把自检拖到分钟级），
+                // 所以这里跳过并如实说明，而不是跑三遍注定失败的检查。
                 items += CheckItem(
-                    "签名伪造", "伪造链路 · ${comp.packageName}",
-                    if (result.chainOk) CheckStatus.PASS else CheckStatus.FAIL,
-                    when {
-                        result.chainOk && result.isOfficial ->
-                            "容器返回 Google 官方签名（${result.actualSha1}），应用侧校验会通过。"
-                        result.chainOk ->
-                            "容器返回值已被替换（${result.actualSha1}），说明伪造链路是通的；" +
-                                "只是证书不是官方的，microG 不会认可。"
-                        result.actualSha1 == null ->
-                            "查询不到该包。确认它已经装进这个空间。"
-                        else ->
-                            "容器返回的仍是 ${result.actualSha1}，与策略期望的 ${result.expectedSha1} 不一致——" +
-                                "伪造没有生效。检查 Bcore 是否已按 tools/build-bcore.sh 打过补丁并重建。"
-                    },
+                    "签名伪造", "伪造链路 · 端到端验证",
+                    CheckStatus.WARN,
+                    "证书未就绪，跳过链路验证。先补齐证书" +
+                        "（TEST 用 tools/gen-test-cert.sh 生成，OFFICIAL 从你合法持有的 GMS APK 导出），" +
+                        "再重跑自检。",
                 )
+            } else {
+                MicroGComponent.REQUIRED.forEach { comp ->
+                    val result = spoof.verifyDetailed(spaceId, comp.packageName)
+                    items += CheckItem(
+                        "签名伪造", "伪造链路 · ${comp.packageName}",
+                        if (result.chainOk) CheckStatus.PASS else CheckStatus.FAIL,
+                        when {
+                            result.chainOk && result.isOfficial ->
+                                "容器返回 Google 官方签名（${result.actualSha1}），应用侧校验会通过。"
+                            result.chainOk ->
+                                "容器返回值已被替换（${result.actualSha1}），说明伪造链路是通的；" +
+                                    "只是证书不是官方的，microG 不会认可。"
+                            result.actualSha1 == null ->
+                                "查询不到该包。确认它已经装进这个空间。"
+                            else ->
+                                "容器返回的仍是 ${result.actualSha1}，与策略期望的 ${result.expectedSha1} 不一致——" +
+                                    "伪造没有生效。检查 Bcore 是否已按 tools/build-bcore.sh 打过补丁并重建。"
+                        },
+                    )
+                }
             }
         }
 

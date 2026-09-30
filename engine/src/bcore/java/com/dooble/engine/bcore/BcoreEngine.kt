@@ -529,18 +529,37 @@ class BcoreEngine private constructor() : VirtualEngine {
      * `labelRes`，再把 `sourceDir` / `publicSourceDir` 补上，
      * 这样 `getApplicationLabel` 才找得到资源表。
      */
+    /**
+     * APK 应用名解析缓存：`apkPath -> (mtime, label)`。
+     *
+     * [listApps] 对容器里的每个包都要解析一次 APK 取名字，而容器包列表里
+     * 混着宿主全部系统包（几百个），模拟器/翻译层环境下一次全解析要分钟级。
+     * key 带上文件 mtime：覆盖安装后路径不变内容变，mtime 变了自然重解析。
+     */
+    private val labelCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, String>>()
+
     private fun labelFromApk(apkPath: String?): String? {
         if (apkPath.isNullOrBlank()) return null
-        if (!File(apkPath).isFile) return null
+        val apkFile = File(apkPath)
+        if (!apkFile.isFile) return null
+        val mtime = runCatching { apkFile.lastModified() }.getOrDefault(0L)
+        labelCache[apkPath]?.let { (cachedAt, label) ->
+            if (cachedAt == mtime) return label
+        }
         val pm = coreContext?.packageManager ?: return null
-        return runCatching {
+        val label = runCatching {
             @Suppress("DEPRECATION")
             val info = pm.getPackageArchiveInfo(apkPath, 0)?.applicationInfo
                 ?: return@runCatching null
             info.sourceDir = apkPath
             info.publicSourceDir = apkPath
             pm.getApplicationLabel(info).toString()
-        }.getOrNull()?.takeIf { it.isNotBlank() }
+        }.getOrNull()?.takeIf { it.isNotBlank() } ?: return null
+
+        // 防御性上限：包列表再大也就几百项，超过说明有异常路径在灌缓存
+        if (labelCache.size > 1024) labelCache.clear()
+        labelCache[apkPath] = mtime to label
+        return label
     }
 
     private fun upsert(spaceId: String, app: VirtualApp): VirtualApp {

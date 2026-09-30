@@ -4,6 +4,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -81,7 +83,13 @@ fun BrutalConfirmDialog(
             background = Paper,
             shadowOffset = 8.dp,
         ) {
-            Column(Modifier.fillMaxWidth()) {
+            // 内容（代价明细 + 勾选 + 按钮）在矮屏/横屏上可能超出屏幕，
+            // 不加滚动时确认按钮会被裁掉——与「新建空间」对话框同款问题
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
 
                 // -------------------------------------------------- 警示条
                 Row(

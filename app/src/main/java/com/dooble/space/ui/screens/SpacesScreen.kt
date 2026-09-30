@@ -352,9 +352,14 @@ private fun CreateSpaceDialog(
             background = Paper,
             shadowOffset = 8.dp,
         ) {
+            // verticalScroll 必须有：内容（名称 + 指纹 + 选项 + 按钮）在横屏或
+            // 矮屏上一屏放不下，而 Dialog 不会自己让内容滚动——实测 MuMu 横屏下
+            // 「创建/取消」按钮被裁到屏幕外且滚不动，整个对话框不可用。
+            // 加滚动后按钮在任何屏幕高度都可达。
             Column(
                 Modifier
                     .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
                     .padding(16.dp)
             ) {
                 Text("新建空间", style = MaterialTheme.typography.displayMedium, color = Ink)
