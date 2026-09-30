@@ -154,7 +154,7 @@ class GmsProvisioner(
                 }
                 if (apk == null) {
                     // 把"为什么没有直链"如实说出来。只写"需手动导入"会让用户
-                    // 去找一个上游根本不存在的文件（MapsV1 就是这种）。
+                    // 去找一个上游根本不存在的文件。
                     val why = component.manualOnlyReason
                         ?: "无官方直链，需手动导入 APK"
                     val msg = "跳过 ${component.packageName}：$why"
@@ -290,7 +290,7 @@ class GmsProvisioner(
     /**
      * 手动导入组件 APK。
      *
-     * 用于那些没有官方直链的可选组件（GsfProxy / MapsV1），
+     * 用于那些没有官方直链的可选组件（GsfProxy），
      * 以及用户想锁定某个特定版本、不走网络下载的场景。
      * 导入后会被 [resolveApk] 的第 2 级（本地缓存）命中。
      */

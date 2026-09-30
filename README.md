@@ -20,7 +20,7 @@ Dooble Double 让你在一台手机上创建多个**互相隔离的虚拟 Androi
 | 层 | 选型 | 许可 |
 |---|---|---|
 | 虚拟化引擎 | 应用层虚拟化容器（Bcore / VirtualApp 血统） | Apache-2.0 |
-| 谷歌环境 | microG（GmsCore + FakeStore + GsfProxy + MapsV1） | Apache-2.0 |
+| 谷歌环境 | microG（GmsCore + FakeStore + GsfProxy） | Apache-2.0 |
 | 签名伪造 | 容器级 PackageManagerService Hook（**不需要 Root，不需要改 ROM**） | 自研 |
 | Native 层 | 自研 PLT Hook + IO 重定向（可替换为 Dobby / xDL） | 自研 |
 | 语言 | Kotlin（业务 / UI）+ Java（容器核心）+ C++/NDK（native hook）+ AIDL（IPC） | — |

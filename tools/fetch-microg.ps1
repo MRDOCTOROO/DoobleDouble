@@ -71,5 +71,5 @@ if ($Huawei) {
 }
 
 Write-Host ""
-Write-Host "完成。可选组件（GsfProxy / MapsV1）需从各自仓库手动下载。"
+Write-Host "完成。可选组件（GsfProxy）需从各自仓库手动下载。"
 Write-Host "assets 中的 APK 已在 .gitignore 中排除。"

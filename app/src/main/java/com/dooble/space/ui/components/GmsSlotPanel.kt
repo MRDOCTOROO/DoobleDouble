@@ -31,7 +31,6 @@ import com.dooble.engine.HostAppRules
 import com.dooble.engine.VirtualApp
 import com.dooble.gms.GoogleStack
 import com.dooble.gms.MicroGComponent
-import com.dooble.gms.OemStack
 import com.dooble.space.system.AppListAccess
 import com.dooble.space.ui.theme.Danger
 import com.dooble.space.ui.theme.Ink
@@ -120,13 +119,11 @@ private fun GmsSlotRow(
 ) {
     val statusColor = when {
         installed -> Success
-        comp.deprecated -> InkFaint
         comp.required -> Danger
         else -> Warning
     }
     val statusText = when {
         installed -> installedVersion?.takeIf { it.isNotBlank() }?.let { "已装入 $it" } ?: "已装入"
-        comp.deprecated -> "已废弃"
         comp.manualOnlyReason != null -> "需手动导入"
         else -> "未安装"
     }
@@ -143,7 +140,7 @@ private fun GmsSlotRow(
                 Text(
                     text = comp.shortName,
                     style = MaterialTheme.typography.titleMedium,
-                    color = if (comp.deprecated) InkFaint else Ink,
+                    color = Ink,
                     modifier = Modifier.weight(1f),
                 )
                 Text(
@@ -164,12 +161,8 @@ private fun GmsSlotRow(
                 Spacer(Modifier.height(4.dp))
                 Text(it, style = MaterialTheme.typography.labelSmall, color = Warning)
             }
-            comp.deprecatedReason?.let {
-                Spacer(Modifier.height(4.dp))
-                Text(it, style = MaterialTheme.typography.labelSmall, color = InkFaint)
-            }
 
-            if (comp.downloadable && !comp.deprecated) {
+            if (comp.downloadable) {
                 Spacer(Modifier.height(4.dp))
                 Text(
                     text = "官方直链：${comp.downloadRepo} ${comp.releaseTag}" +
@@ -179,27 +172,25 @@ private fun GmsSlotRow(
                 )
             }
 
-            if (!comp.deprecated) {
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (hostHas) {
-                        GlassButton(
-                            text = if (busy) "处理中…" else "从宿主克隆",
-                            onClick = onClone,
-                            variant = ButtonVariant.Accent,
-                            accent = accent,
-                            enabled = actionsEnabled && !busy,
-                            compact = true,
-                        )
-                    }
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (hostHas) {
                     GlassButton(
-                        text = "导入 APK",
-                        onClick = onImport,
-                        variant = ButtonVariant.Secondary,
+                        text = if (busy) "处理中…" else "从宿主克隆",
+                        onClick = onClone,
+                        variant = ButtonVariant.Accent,
+                        accent = accent,
                         enabled = actionsEnabled && !busy,
                         compact = true,
                     )
                 }
+                GlassButton(
+                    text = "导入 APK",
+                    onClick = onImport,
+                    variant = ButtonVariant.Secondary,
+                    enabled = actionsEnabled && !busy,
+                    compact = true,
+                )
             }
 
             if (GoogleStack.officialNeedsSystemInstall(comp.packageName)) {
@@ -210,83 +201,6 @@ private fun GmsSlotRow(
                     color = InkFaint,
                 )
             }
-        }
-    }
-}
-
-/** 「关于原版谷歌服务」说明卡 */
-@Composable
-fun OfficialGoogleNote(accent: Color) {
-    GlassCard(
-        Modifier.fillMaxWidth(),
-        tint = Color.White.copy(alpha = 0.42f),
-        contentPadding = 14.dp,
-    ) {
-        Column {
-            Text("关于「原版谷歌三件套」", style = MaterialTheme.typography.titleMedium, color = Ink)
-            Spacer(Modifier.height(8.dp))
-
-            NoteParagraph("为什么不内置", GoogleStack.WHY_NOT_BUNDLED, Danger)
-            NoteParagraph("怎么拿到", GoogleStack.HOW_TO_GET_OFFICIAL, Ink)
-            NoteParagraph("容器支持", GoogleStack.CONTAINER_SUPPORT, Ink)
-            NoteParagraph("槽位互斥", GoogleStack.SLOT_EXCLUSIVE, Warning)
-
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = "原版 Play 商店要真正可用，需要同时满足：",
-                style = MaterialTheme.typography.labelMedium,
-                color = Ink,
-            )
-            GoogleStack.PLAY_STORE_REQUIREMENTS.forEachIndexed { i, line ->
-                Row(Modifier.padding(bottom = 3.dp)) {
-                    Text(
-                        text = "${i + 1}.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = InkSoft,
-                        modifier = Modifier.width(18.dp),
-                    )
-                    Text(
-                        text = line,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = InkSoft,
-                    )
-                }
-            }
-
-            Spacer(Modifier.height(8.dp))
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(10.dp)
-                    .background(Success.copy(alpha = 0.14f), androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
-            ) {
-                Box(Modifier.size(8.dp).background(Success, androidx.compose.foundation.shape.RoundedCornerShape(4.dp)))
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = GoogleStack.PLAY_STORE_VERDICT,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Success,
-                )
-            }
-
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = "推荐做法：GmsCore 用 microG（官方直链一键装），商店用 Aurora Store。",
-                style = MaterialTheme.typography.labelSmall,
-                color = InkFaint,
-            )
-        }
-    }
-}
-
-@Composable
-private fun NoteParagraph(title: String, body: String, color: Color) {
-    Row(Modifier.padding(bottom = 6.dp)) {
-        Box(Modifier.padding(top = 5.dp).size(6.dp).background(color, androidx.compose.foundation.shape.RoundedCornerShape(3.dp)))
-        Spacer(Modifier.width(8.dp))
-        Column {
-            Text(title, style = MaterialTheme.typography.labelMedium, color = Ink)
-            Text(body, style = MaterialTheme.typography.labelSmall, color = InkSoft)
         }
     }
 }
@@ -364,91 +278,6 @@ fun HostListEmptyHints(includeSystem: Boolean, gated: Boolean) {
                 style = MaterialTheme.typography.labelSmall,
                 color = Danger,
                 textAlign = TextAlign.Center,
-            )
-        }
-    }
-}
-
-/** 厂商自有服务槽位（华为/荣耀） */
-@Composable
-fun OemSlotPanel(
-    slots: List<OemStack.Slot>,
-    apps: List<VirtualApp>,
-    hostPackages: Set<String>,
-    busyPackage: String?,
-    accent: Color,
-    actionsEnabled: Boolean,
-    isHuaweiDevice: Boolean,
-    onCloneFromHost: (String) -> Unit,
-) {
-    val anyOnHost = slots.any { it.packageName in hostPackages }
-    val anyInstalled = slots.any { s -> apps.any { it.packageName == s.packageName } }
-    if (!isHuaweiDevice && !anyOnHost && !anyInstalled) return
-
-    GlassCard(
-        Modifier.fillMaxWidth(),
-        tint = Color.White.copy(alpha = 0.42f),
-        contentPadding = 14.dp,
-    ) {
-        Column {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(8.dp).background(accent, androidx.compose.foundation.shape.RoundedCornerShape(4.dp)))
-                Spacer(Modifier.width(8.dp))
-                Text("厂商服务（华为 / 荣耀）", style = MaterialTheme.typography.titleMedium, color = Ink)
-            }
-
-            Spacer(Modifier.height(6.dp))
-            Text(OemStack.HMS_IS_NOT_GMS, style = MaterialTheme.typography.labelSmall, color = Warning)
-
-            if (isHuaweiDevice) {
-                Spacer(Modifier.height(6.dp))
-                Text(OemStack.HARMONY_NEXT_WARNING, style = MaterialTheme.typography.labelSmall, color = Danger)
-                Spacer(Modifier.height(6.dp))
-                Text(OemStack.HUAWEI_KEEPALIVE_HINT, style = MaterialTheme.typography.labelSmall, color = InkFaint)
-            }
-
-            slots.forEach { slot ->
-                val installed = apps.any { it.packageName == slot.packageName }
-                val hostHas = slot.packageName in hostPackages
-                val busy = busyPackage == slot.packageName
-
-                Spacer(Modifier.height(10.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        Modifier.size(8.dp).background(
-                            if (installed) Success else if (hostHas) Warning else InkFaint,
-                            androidx.compose.foundation.shape.RoundedCornerShape(4.dp)
-                        )
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(slot.shortName, style = MaterialTheme.typography.titleMedium, color = Ink, modifier = Modifier.weight(1f))
-                    Text(
-                        text = if (installed) "已装入" else if (hostHas) "宿主有" else "宿主没有",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (installed) Success else InkSoft,
-                    )
-                }
-                Text(slot.description, style = MaterialTheme.typography.labelSmall, color = InkSoft)
-                Text(slot.impact, style = MaterialTheme.typography.labelSmall, color = InkFaint)
-                Text(slot.packageName, style = MaterialTheme.typography.labelSmall, color = InkFaint)
-                if (hostHas) {
-                    Spacer(Modifier.height(6.dp))
-                    GlassButton(
-                        text = if (busy) "处理中…" else "从宿主克隆",
-                        onClick = { onCloneFromHost(slot.packageName) },
-                        variant = ButtonVariant.Accent,
-                        accent = accent,
-                        enabled = actionsEnabled && !busy,
-                        compact = true,
-                    )
-                }
-            }
-
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = "HMS 组件是华为/荣耀设备自带的，本应用不打包也不下载，只支持从你自己的设备克隆（与谷歌组件的同一条合规红线）。",
-                style = MaterialTheme.typography.labelSmall,
-                color = InkFaint,
             )
         }
     }

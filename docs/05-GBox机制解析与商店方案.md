@@ -337,7 +337,6 @@ UI 上的"谷歌环境"是一排槽位。每个槽位**一个包名**，可以�
 | GmsCore | `com.google.android.gms` | ✅ `microg/GmsCore` | 必需。103MB |
 | FakeStore | `com.android.vending` | ✅ `microg/GmsCore` | 必需。仅占位，4MB |
 | GSF Proxy | `com.google.android.gsf` | ✅ `microg/GsfProxy` | 可选。21.4KB |
-| Maps v1 | `com.google.android.maps` | ❌ 无 | **已废弃，不需要装** |
 
 ### 5.1 GSF Proxy 是什么，为什么之前装不上
 
@@ -357,20 +356,6 @@ GsfProxy 是 `v0.1.0`）。顺带修掉一个隐患：`candidates()` 之前会�
 
 > 现代应用用的是 **FCM**（走 GmsCore 自己的通道），不再经过 GSF。
 > 所以这个槽位对绝大多数人是**不需要**的，但成本只有 21KB，留着无妨。
-
-### 5.2 Maps v1 为什么永远装不上（也永远不需要）
-
-`microg/android_frameworks_mapsv1` 提供的是已废弃的 **Google Maps API v1**。
-它有两个关键事实：
-
-1. **它是系统库，不是 APK**。上游以 `/system/framework` 下的 jar + 权限 xml 形式
-   分发（`mapsv1-flashable` 刷机包），没有可安装的 APK 文件。
-   所以"导入 APK"这条路径对它天然无效。
-2. **它要服务的那批应用已经装不上了**。Maps v1 只对 `targetSdk < 21` 的应用有意义，
-   而 Android 14（API 34）起系统**直接拒绝安装** `targetSdk < 23` 的应用。
-
-结论：现代 Android 上这个槽位**不需要填**。UI 上把它标成"已废弃"并写明原因，
-而不是给一个永远点不动的按钮 —— 后者会让用户反复尝试然后认为功能坏了。
 
 ---
 

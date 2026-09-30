@@ -110,7 +110,6 @@ object GoogleStack {
         MicroGComponent.GMS_CORE.packageName,
         MicroGComponent.FAKE_STORE.packageName,
         MicroGComponent.GSF_PROXY.packageName,
-        MicroGComponent.MAPS_V1.packageName,
         MicroGComponent.MICROG_RE.packageName,
         StorePackages.AURORA,
     )

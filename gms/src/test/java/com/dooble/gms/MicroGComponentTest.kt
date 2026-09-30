@@ -38,7 +38,6 @@ class MicroGComponentTest {
             "com.google.android.gms",
             "com.android.vending",
             "com.google.android.gsf",
-            "com.google.android.maps",
             "app.revanced.android.gms",
         )
         MicroGComponent.entries.forEach {
@@ -101,37 +100,10 @@ class MicroGComponentTest {
     }
 
     @Test
-    fun `无直链组件在华为变体下也返回空串`() {
-        assertEquals("", MicroGComponent.MAPS_V1.remoteFileName(huawei = false))
-        assertEquals("", MicroGComponent.MAPS_V1.remoteFileName(huawei = true))
-    }
-
-    @Test
     fun `REQUIRED 只含必需组件`() {
         assertTrue(MicroGComponent.GMS_CORE in MicroGComponent.REQUIRED)
         assertTrue(MicroGComponent.FAKE_STORE in MicroGComponent.REQUIRED)
         assertFalse(MicroGComponent.GSF_PROXY in MicroGComponent.REQUIRED)
-        assertFalse(MicroGComponent.MAPS_V1 in MicroGComponent.REQUIRED)
-    }
-
-    @Test
-    fun `可装配槽位不含已废弃组件`() {
-        // 留一个永远装不上的槽位，用户会反复点、反复失败，然后认为整个功能是坏的。
-        assertFalse(MicroGComponent.MAPS_V1 in MicroGComponent.INSTALLABLE)
-        assertTrue(MicroGComponent.MAPS_V1.deprecated)
-        assertNotNull(MicroGComponent.MAPS_V1.deprecatedReason)
-
-        // 其余都在
-        assertTrue(MicroGComponent.GMS_CORE in MicroGComponent.INSTALLABLE)
-        assertTrue(MicroGComponent.FAKE_STORE in MicroGComponent.INSTALLABLE)
-        assertTrue(MicroGComponent.GSF_PROXY in MicroGComponent.INSTALLABLE)
-    }
-
-    @Test
-    fun `除 MapsV1 外没有别的组件被标为废弃`() {
-        // 误标废弃会让功能悄悄从 UI 上消失。
-        val deprecated = MicroGComponent.entries.filter { it.deprecated }
-        assertEquals(listOf(MicroGComponent.MAPS_V1), deprecated)
     }
 
     @Test
@@ -146,7 +118,6 @@ class MicroGComponentTest {
     fun `releaseUrl 只在有仓库时给出`() {
         assertTrue(MicroGComponent.GSF_PROXY.releaseUrl.contains("/microg/GsfProxy/"))
         assertTrue(MicroGComponent.GSF_PROXY.releaseUrl.endsWith("/v0.1.0"))
-        assertEquals("", MicroGComponent.MAPS_V1.releaseUrl)
     }
 
     @Test

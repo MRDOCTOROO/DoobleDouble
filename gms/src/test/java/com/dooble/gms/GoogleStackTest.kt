@@ -83,7 +83,6 @@ class GoogleStackTest {
         assertTrue(GoogleStack.officialNeedsSystemInstall("com.google.android.gms"))
         assertTrue(GoogleStack.officialNeedsSystemInstall("com.android.vending"))
         assertFalse(GoogleStack.officialNeedsSystemInstall("com.google.android.gsf"))
-        assertFalse(GoogleStack.officialNeedsSystemInstall("com.google.android.maps"))
         assertFalse(GoogleStack.officialNeedsSystemInstall("com.example.other"))
     }
 

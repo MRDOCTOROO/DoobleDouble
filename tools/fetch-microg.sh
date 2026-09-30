@@ -89,9 +89,8 @@ else
 fi
 
 echo
-echo "完成。可选组件（GsfProxy / MapsV1）不在 GmsCore 仓库中，"
+echo "完成。可选组件（GsfProxy）不在 GmsCore 仓库中，"
 echo "如需可从以下仓库手动下载后放入同一目录："
 echo "  GsfProxy : https://github.com/microg/GsfProxy/releases"
-echo "  MapsV1   : https://github.com/microg/android_packages_apps_GmsCore"
 echo
 echo "注意：assets 中的 APK 已在 .gitignore 中排除，不会被提交。"

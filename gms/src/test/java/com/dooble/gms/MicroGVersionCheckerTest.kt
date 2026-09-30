@@ -240,14 +240,6 @@ class MicroGVersionCheckerTest {
     }
 
     @Test
-    fun `无官方直链的组件在硬编码路径下返回空列表`() {
-        // MapsV1 上游以系统库形式分发（/system/framework 下的 jar + 权限 xml），
-        // 不是 APK，所以没有可下载的文件。GSF Proxy 则**有**直链（见下一条用例）。
-        assertTrue(MicroGRepository.candidates(MicroGComponent.MAPS_V1).isEmpty())
-        assertFalse(MicroGRepository.isDownloadable(MicroGComponent.MAPS_V1))
-    }
-
-    @Test
     fun `GSF Proxy 有自己的仓库与 tag 不再是无直链组件`() {
         // GSF Proxy 在 microg/GsfProxy，不在 GmsCore 仓库里；tag 也完全不同
         // （v0.1.0 vs v0.3.16.252432）。它此前被当成"只能手动导入"，
@@ -280,21 +272,6 @@ class MicroGVersionCheckerTest {
             list.any { it.contains("/microg/GsfProxy/") },
         )
         assertTrue(list.none { it.contains("com.google.android.gsf-999.apk") })
-    }
-
-    @Test
-    fun `无仓库的组件即使 release 里有同名资产也不给直链`() {
-        // MapsV1 的 downloadRepo 是空串（上游以系统库形式分发，没有 release 资产）。
-        // 仓库核对会直接跳过 release 分支 —— 不会因为某个仓库恰好挂了 maps 的资产
-        // 就凭空多出一个直链。这个守卫是加 repo 字段时一并加的，之前没有，
-        // 表现是"GmsCore 的资产列表被拿去匹配 maps 前缀"。
-        val r = Release(
-            tag = "v1",
-            publishedAt = "",
-            assets = listOf(asset("com.google.android.maps-1.apk", 10)),
-        )
-        assertFalse(MicroGRepository.isDownloadable(MicroGComponent.MAPS_V1))
-        assertTrue(MicroGRepository.candidates(MicroGComponent.MAPS_V1, release = r).isEmpty())
     }
 
     @Test

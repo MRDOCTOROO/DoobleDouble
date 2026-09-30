@@ -15,7 +15,6 @@ import com.dooble.gms.GoogleAccountInfo
 import com.dooble.gms.GmsSignatureSpoof
 import com.dooble.gms.GoogleStack
 import com.dooble.gms.MicroGComponent
-import com.dooble.gms.OemStack
 import com.dooble.gms.ProvisionReport
 import com.dooble.gms.ProvisionStep
 import com.dooble.gms.SelfCheckReport
@@ -184,17 +183,6 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
      */
     private val _hostGooglePackages = MutableStateFlow<Set<String>>(emptySet())
     val hostGooglePackages: StateFlow<Set<String>> = _hostGooglePackages.asStateFlow()
-
-    /**
-     * 当前设备是不是华为/荣耀。
-     *
-     * 只算一次：`Build.MANUFACTURER` / `Build.BRAND` 在整个进程生命周期内不会变，
-     * 放进 StateFlow 只是为了让 UI 能订阅。
-     */
-    private val _isHuaweiDevice = MutableStateFlow(
-        OemStack.isHuaweiDevice(android.os.Build.MANUFACTURER, android.os.Build.BRAND)
-    )
-    val isHuaweiDevice: StateFlow<Boolean> = _isHuaweiDevice.asStateFlow()
 
     private val _spoofCert = MutableStateFlow<GmsSignatureSpoof.CertInfo?>(null)
     val spoofCert: StateFlow<GmsSignatureSpoof.CertInfo?> = _spoofCert.asStateFlow()
@@ -521,9 +509,8 @@ class SpaceViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshHostGooglePackages() {
         viewModelScope.launch {
             val scanner = runCatching { DoobleContainer.hostScanner }.getOrNull() ?: return@launch
-            // 谷歌侧 + 厂商侧（华为/荣耀）。厂商那几个包在非华为设备上不存在，
-            // 查出来就是空集，UI 自然不会显示对应槽位 —— 不需要额外分支。
-            val wanted = GoogleStack.WATCHED_PACKAGES + OemStack.WATCHED_PACKAGES
+            // 谷歌侧组件。UI 靠它们决定要不要显示「从宿主克隆」按钮。
+            val wanted = GoogleStack.WATCHED_PACKAGES
             val found = withContext(Dispatchers.IO) {
                 wanted.filterTo(HashSet()) { scanner.isInstalledOnHost(it) }
             }

@@ -14,7 +14,6 @@ package com.dooble.gms
  *  - `com.google.android.gms`   ← GmsCore 本体
  *  - `com.android.vending`      ← FakeStore（让应用以为 Play 商店存在）
  *  - `com.google.android.gsf`   ← GSF Proxy
- *  - `com.google.android.maps`  ← Maps v1 兼容层
  */
 enum class MicroGComponent(
     val packageName: String,
@@ -60,11 +59,6 @@ enum class MicroGComponent(
      * UI 必须走"手动导入"路径，并把这个理由显示出来。
      */
     val manualOnlyReason: String? = null,
-    /**
-     * 已废弃的说明。非 null 表示在现代 Android 上这个组件已经没有意义，
-     * UI 应该如实标出来，而不是给一个永远装不上的按钮。
-     */
-    val deprecatedReason: String? = null,
 ) {
     GMS_CORE(
         packageName = "com.google.android.gms",
@@ -122,31 +116,10 @@ enum class MicroGComponent(
         remoteName = "microg-7.1.1.apk",
         remoteNameHw = "microg-7.1.1-noicon.apk",
         assetPrefix = "microg",
-    ),
-
-    MAPS_V1(
-        packageName = "com.google.android.maps",
-        assetName = "com.google.android.maps.apk",
-        system = true,
-        required = false,
-        approxSizeMb = 1,
-        shortName = "Maps v1",
-        description = "Maps v1 兼容层：只服务 targetSdk < 21 且使用已废弃的 Maps API v1 的老应用",
-        downloadRepo = "",
-        releaseTag = "",
-        remoteName = "",
-        manualOnlyReason = "MapsV1 上游以**系统库**形式分发（/system/framework 下的 jar + 权限 xml），" +
-            "不是 APK，因此无法作为普通应用安装进空间，也没有可下载的 APK 文件。",
-        deprecatedReason = "MapsV1 只对 targetSdk < 21 的应用有意义，而 Android 14（API 34）起" +
-            "系统直接拒绝安装 targetSdk < 23 的应用 —— 也就是说它要服务的那批应用" +
-            "在现代设备上根本装不上。现代 Android 上这个槽位**不需要填**。",
     );
 
     /** 是否有可下载的官方直链 */
     val downloadable: Boolean get() = remoteName.isNotEmpty()
-
-    /** 是否已废弃（现代设备上无意义） */
-    val deprecated: Boolean get() = deprecatedReason != null
 
     /** 按变体取上游文件名；无直链返回空串 */
     fun remoteFileName(huawei: Boolean = false): String =
@@ -163,11 +136,8 @@ enum class MicroGComponent(
 
         /**
          * 值得在 UI 上作为"可装配槽位"呈现的组件。
-         *
-         * 排除已废弃的（MapsV1）：留着一个永远装不上的槽位，用户会反复点、
-         * 反复失败，然后认为整个功能是坏的。废弃组件在 UI 上单独用文字说明。
          */
-        val INSTALLABLE: List<MicroGComponent> = entries.filter { !it.deprecated }
+        val INSTALLABLE: List<MicroGComponent> = entries.toList()
 
         /** 有官方直链、可以直接装配的组件 */
         val DOWNLOADABLE: List<MicroGComponent> = entries.filter { it.downloadable }
