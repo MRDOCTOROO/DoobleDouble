@@ -182,6 +182,19 @@ class GmsProvisioner(
                 .onFailure { errors += "设备指纹配置失败: ${it.message}" }
         }
 
+        // 预写 microG 设备注册开关(checkin):microG 默认关,而登录页会先等
+        // 注册完成 —— 不开就永远卡在「正在建立到 Google 服务器的连接」(实测)。
+        // 赶在 microG 首次运行前写入;失败不阻断装配,用户仍可在 microG
+        // 设置 → 向 Google 注册设备 里手动开启。
+        onStep(ProvisionStep(null, total, total, ProvisionPhase.CONFIGURE, "启用 microG 设备注册(checkin)"))
+        val microgUserId = engine.space(spaceId)?.bcoreUserId ?: 0
+        val checkinReady = runCatching {
+            MicroGCheckinBootstrap.ensureEnabled(context.dataDir, microgUserId)
+        }.getOrDefault(false)
+        if (!checkinReady && microgUserId > 0) {
+            skipped += "microG 设备注册预配置未生效,可在 microG 设置 → 向 Google 注册设备 里手动开启"
+        }
+
         val success = MicroGComponent.REQUIRED.all { it.packageName in installed }
         onStep(
             ProvisionStep(
