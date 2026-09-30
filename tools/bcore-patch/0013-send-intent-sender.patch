@@ -1,0 +1,45 @@
+From: Dooble Double <noreply@example.invalid>
+Subject: [PATCH 0013] 放行容器内 PendingIntent 发送（修复 F-Droid 原生安装器卡「正在安装」）
+
+F-Droid 的 DefaultInstaller（原生安装器）在 installPackageInternal 里用
+PendingIntent.getActivity() 创建指向 DefaultInstallerActivity 的 PendingIntent，
+再广播 INSTALL_USER_INTERACTION。Bcore 的 IActivityManagerProxy.SendIntentSender
+钩子无条件返回 0，等于吞掉容器内所有 PendingIntent 的发送——DefaultInstallerActivity
+永远不会启动，ACTION_INSTALL_PACKAGE 永远不会发出，安装卡在「正在安装…」。
+
+GetIntentSender 钩子已经把 PendingIntent 的目标组件换成宿主的 ProxyPendingActivity
+并把真实 intent 存进 ProxyPendingRecord，所以 SendIntentSender 放行是安全的：
+发送后由宿主 ProxyPendingActivity 读记录再路由回容器内真实组件。
+
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IActivityManagerProxy.java b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IActivityManagerProxy.java
+index 4f571d1..3606fea 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IActivityManagerProxy.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IActivityManagerProxy.java
+@@ -647,9 +647,26 @@ public class IActivityManagerProxy extends ClassInvocationStub {
+     @ProxyMethod("sendIntentSender")
+     public static class SendIntentSender extends MethodHook {
+ 
++        /**
++         * Dooble: 放行 PendingIntent 发送。
++         *
++         * <p>上游默认返回 0，等于把容器内所有 PendingIntent 的发送静默吞掉。
++         * 这会让依赖 PendingIntent 的流程卡死：F-Droid 的「原生安装程序」在
++         * {@code DefaultInstaller.installPackageInternal} 里用
++         * {@code PendingIntent.getActivity()} 创建指向
++         * {@code DefaultInstallerActivity} 的 PendingIntent，再广播
++         * INSTALL_USER_INTERACTION。PendingIntent 发不出去，
++         * {@code DefaultInstallerActivity} 永远不会启动，安装就停在
++         * 「正在安装…」。
++         *
++         * <p>创建侧的 {@code GetIntentSender} 钩子已经把目标组件换成宿主
++         * {@code ProxyPendingActivity} 并把真实 intent 存进 ProxyPendingRecord，
++         * 所以这里放行是安全的：发送后由宿主的 ProxyPendingActivity 读取记录，
++         * 再路由回容器内的真实组件。
++         */
+         @Override
+         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+-            return 0;
++            return method.invoke(who, args);
+         }
+     }
+ 
