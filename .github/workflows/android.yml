@@ -6,9 +6,13 @@ name: Android
 # 本工程只有 arm64-v8a / armeabi-v7a 两个 ABI（Bcore 的 libblackbox.so 上游只出
 # 这两个）。本地出包要装 JDK 17 + Android SDK 35 + NDK 26.1.10909125 + CMake 3.22.1，
 # 换台机器就得重来一遍。放到 CI 上之后：
-#   - 每次 push 自动产出可安装的 APK，手机浏览器直接下；
 #   - 打 tag 自动发 Release，产物长期可访问（artifact 只有 90 天）；
+#   - 手动触发（workflow_dispatch）可随时出包；
 #   - 顺便跑单元测试，避免「本地绿、推上去红」。
+#
+# ⚠️ 省分钟策略：**正常 push 不构建**。只有推送 v* tag（发版）或人工在
+# Actions 页面点 "Run workflow" 时才构建。日常开发提交不会自动消耗
+# GitHub 免费 Actions 分钟（public 仓库无限、private 2000 分钟/月）。
 #
 # ⚠️ 一个必须知道的前提：**Bcore 的 AAR 是入库的**（engine/libs/bcore.aar）。
 # 重建它需要上游源码 + JDK 21 + NDK 29 + 5 个补丁，在 CI 里复现不划算。
@@ -18,23 +22,8 @@ name: Android
 
 on:
   push:
-    branches: [main, master]
+    # 只有打 tag 才触发（发版/出 Release）。普通分支 push 不构建。
     tags: ['v*']
-    # 纯文档/说明类提交不触发构建，省 GitHub 免费 Actions 分钟。
-    # tag 发布不受影响：v* tag 指向的都是改过代码/AAR/补丁的提交，
-    # paths-ignore 只有在「全部变更文件都被忽略」时才跳过。
-    paths-ignore:
-      - 'docs/**'
-      - 'AGENTS.md'
-      - '**/*.md'
-      - 'README*'
-  pull_request:
-    branches: [main, master]
-    paths-ignore:
-      - 'docs/**'
-      - 'AGENTS.md'
-      - '**/*.md'
-      - 'README*'
   workflow_dispatch:
     inputs:
       build_full:
