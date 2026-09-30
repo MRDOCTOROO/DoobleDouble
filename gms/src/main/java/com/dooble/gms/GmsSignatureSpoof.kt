@@ -281,7 +281,7 @@ class GmsSignatureSpoof(
     }
 
     private fun hintFor(mode: SpoofMode): String = when (mode) {
-        SpoofMode.TEST -> "执行 tools/gen-test-cert.sh 生成后重试。"
+        SpoofMode.TEST -> "已内置自签证书，可直接使用。"
         SpoofMode.OFFICIAL -> "从你合法持有的 GMS APK 中导出证书，放到 ${'$'}filesDir/dooble/signature/$CERT_ASSET_OFFICIAL。"
         SpoofMode.OFF -> ""
     }
@@ -298,12 +298,11 @@ class GmsSignatureSpoof(
          */
         const val GMS_SHA1 = "38918a453d07199354f8b19af05ec6562ced5788"
 
-        /** 需要伪造签名的包。前三个是 microG 栈的核心 */
+        /** 需要伪造签名的包。microG 栈的核心 */
         val SPOOF_PACKAGES = listOf(
             "com.google.android.gms",
             "com.google.android.gsf",
             "com.android.vending",
-            "com.google.android.maps",
         )
 
         /**

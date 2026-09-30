@@ -58,6 +58,14 @@ data class DeviceSpoofProfile(
 ) {
     companion object {
         val PIXEL_8_PRO = DeviceSpoofProfile()
+        val PIXEL_8 = DeviceSpoofProfile(
+            model = "Pixel 8",
+            device = "shiba",
+            product = "shiba",
+            board = "shiba",
+            hardware = "shiba",
+            fingerprint = "google/shiba/shiba:14/AP1A.240505.005/11688946:user/release-keys",
+        )
         val PIXEL_7 = DeviceSpoofProfile(
             model = "Pixel 7",
             device = "panther",
@@ -65,6 +73,15 @@ data class DeviceSpoofProfile(
             board = "panther",
             hardware = "panther",
             fingerprint = "google/panther/panther:14/AP1A.240505.005/11688946:user/release-keys",
+        )
+        val PIXEL_6A = DeviceSpoofProfile(
+            model = "Pixel 6a",
+            device = "bluejay",
+            product = "bluejay",
+            board = "bluejay",
+            hardware = "bluejay",
+            fingerprint = "google/bluejay/bluejay:13/TQ3A.230901.001/10778935:user/release-keys",
+            sdkInt = 33,
         )
         val XIAOMI_14 = DeviceSpoofProfile(
             brand = "Xiaomi",

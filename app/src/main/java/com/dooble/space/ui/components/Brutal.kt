@@ -85,16 +85,18 @@ fun Modifier.glassClickable(
     enabled: Boolean = true,
     interactionSource: MutableInteractionSource? = null,
     onLongClick: (() -> Unit)? = null,
+    onDoubleClick: (() -> Unit)? = null,
     onClick: () -> Unit,
 ): Modifier = composed {
     val source = interactionSource ?: remember { MutableInteractionSource() }
-    if (onLongClick != null) {
+    if (onLongClick != null || onDoubleClick != null) {
         combinedClickable(
             interactionSource = source,
             indication = null,
             enabled = enabled,
             onClick = onClick,
             onLongClick = onLongClick,
+            onDoubleClick = onDoubleClick,
         )
     } else {
         clickable(
@@ -170,6 +172,7 @@ fun GlassCard(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
     onLongClick: (() -> Unit)? = null,
+    onDoubleClick: (() -> Unit)? = null,
     shape: Shape = GlassShapes.Card,
     tint: Color = Color.White.copy(alpha = 0.58f),
     borderColor: Color = Color.White.copy(alpha = 0.72f),
@@ -188,6 +191,7 @@ fun GlassCard(
         onClick != null -> Modifier.glassClickable(
             interactionSource = interaction,
             onLongClick = onLongClick,
+            onDoubleClick = onDoubleClick,
             onClick = onClick,
         )
         else -> Modifier

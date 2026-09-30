@@ -43,7 +43,9 @@ local.properties
 /keystore/
 
 # 本地测试用的自签证书与密钥库（由 tools/gen-test-cert.sh 生成）
-# 绝不能让证书进版本库——哪怕它只是一张自签测试证书
+# 私钥/密钥库（.p12/.jks）绝不能让证书进版本库；DER 是公钥证书，不涉密。
+# app/src/main/assets/signature/test_platform.der 是内置到应用里的自签测试证书
+# （用户要求开箱即用，见 docs/06），允许入库；其它 .der 仍按下方规则忽略。
 /local/signature/
 
 # 本地调试产物：模拟器截图、临时抓包等。整个 local/ 都不该进版本库
@@ -58,6 +60,8 @@ local.properties
 /google_platform.der
 *.der
 **/assets/signature/*.der
+# 唯一例外：内置的自签测试证书（公钥证书，非 Google 官方证书，无合规风险）
+!app/src/main/assets/signature/test_platform.der
 
 # 本地测试用的 APK 副本（从 build/outputs 拷出来的稳定路径，方便 adb install）
 /dist/

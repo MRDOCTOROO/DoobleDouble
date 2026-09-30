@@ -2,7 +2,6 @@ package com.dooble.space.ui.screens
 
 import androidx.compose.runtime.Composable
 import com.dooble.engine.SpaceRuntime
-import com.dooble.engine.VirtualApp
 import com.dooble.space.ui.components.GlassConfirmDialog
 
 /*
@@ -55,52 +54,6 @@ internal fun DeleteSpaceDialog(
         facts = facts,
         ackText = "我已了解：删除后无法恢复，空间内的一切都会永久消失",
         confirmText = "永久删除",
-        dismissText = "取消",
-        onConfirm = onConfirm,
-        onDismiss = onDismiss,
-    )
-}
-
-/**
- * 卸载空间内应用的二次确认。
- *
- * 卸载会带走应用在空间内的全部数据：登录状态、缓存、本地存档。
- * 宿主上那份安装不受影响。microG 组件（GMS/FakeStore）卸载等于拆掉
- * 整个谷歌环境，文案必须单独说明。
- */
-@Composable
-internal fun UninstallAppDialog(
-    app: VirtualApp,
-    onConfirm: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val isGoogleStack = app.isMicroG
-
-    val facts = buildList {
-        add("应用名称" to app.label)
-        add("包名" to app.packageName)
-        add("版本" to "v${app.versionName}")
-        if (app.usesGoogleApis) add("依赖 GMS" to "是")
-    }
-
-    val message = if (isGoogleStack) {
-        "这是谷歌环境的组成部分。卸载后空间里所有依赖 GMS 的应用都会立刻失效，" +
-            "必须重新执行一次「重新装配」才能恢复。应用在空间内的数据也会一并删除。"
-    } else {
-        "卸载会连同这个应用在空间内的数据一起删除——登录状态、缓存、本地存档都找不回来。" +
-            "宿主上安装的那一份不受影响。"
-    }
-
-    GlassConfirmDialog(
-        title = if (isGoogleStack) "卸载谷歌环境组件" else "卸载应用",
-        message = message,
-        facts = facts,
-        ackText = if (isGoogleStack) {
-            "我已了解：这会破坏空间的谷歌环境，需要重新装配才能恢复"
-        } else {
-            "我已了解：该应用在空间内的数据会被永久删除"
-        },
-        confirmText = "卸载",
         dismissText = "取消",
         onConfirm = onConfirm,
         onDismiss = onDismiss,

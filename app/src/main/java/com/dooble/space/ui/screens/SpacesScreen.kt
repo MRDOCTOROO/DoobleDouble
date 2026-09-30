@@ -353,8 +353,10 @@ private fun CreateSpaceDialog(
     var profileIndex by remember { mutableStateOf(0) }
 
     val profiles = listOf(
-        Triple("Google Pixel 8 Pro", "husky · Android 14 · 认证成功率最高", DeviceSpoofProfile.PIXEL_8_PRO),
-        Triple("Google Pixel 7", "panther · Android 14", DeviceSpoofProfile.PIXEL_7),
+        Triple("Google Pixel 8 Pro", "husky · Android 14 · GMS 认证最稳", DeviceSpoofProfile.PIXEL_8_PRO),
+        Triple("Google Pixel 8", "shiba · Android 14 · 认证稳定", DeviceSpoofProfile.PIXEL_8),
+        Triple("Google Pixel 7", "panther · Android 14 · 认证稳定", DeviceSpoofProfile.PIXEL_7),
+        Triple("Google Pixel 6a", "bluejay · Android 13 · 认证稳定", DeviceSpoofProfile.PIXEL_6A),
         Triple("Xiaomi 14", "houji · Android 14", DeviceSpoofProfile.XIAOMI_14),
     )
 
@@ -416,6 +418,12 @@ private fun CreateSpaceDialog(
                         )
                     }
                 }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "型号只影响上报给 Google 的设备指纹，不会改变空间性能。Pixel 系列使用 Google 官方构建指纹，GMS 认证最稳；Xiaomi 档仅供需要国产机型指纹的场景使用。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = InkFaint,
+                )
 
                 Spacer(Modifier.height(16.dp))
                 Text("选项", style = MaterialTheme.typography.labelMedium, color = InkSoft)

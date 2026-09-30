@@ -296,10 +296,20 @@ class BcoreEngine private constructor() : VirtualEngine {
             val userId = userIdOf(spaceId)
             if (userId <= 0) return@withContext LaunchResult.fail("空间未分配 userId")
 
-            // launchApk 返回 false 的常见原因：该包在空间内没有可启动的 Activity
-            val ok = runCatching { core.launchApk(packageName, userId) }.getOrDefault(false)
-            if (ok) LaunchResult.ok()
-            else LaunchResult.fail("启动失败：$packageName（可能没有可启动的入口，或空间环境异常）")
+            // launchApk 返回 false 的常见原因：该包在空间内没有可启动的 Activity。
+            // 这里不能吞异常：真机黑屏排查需要看到底层真实失败原因（虚拟进程拉起失败、
+            // 钩子未注入导致 ActivityNotFoundException 等），因此把异常原样上报，
+            // 同时打日志方便 logcat 排查。
+            return@withContext try {
+                val ok = core.launchApk(packageName, userId)
+                if (ok) LaunchResult.ok()
+                else LaunchResult.fail("启动失败：$packageName（可能没有可启动的入口，或空间环境异常）")
+            } catch (t: Throwable) {
+                Log.e("DoobleBcore", "容器启动异常：$packageName (userId=$userId)", t)
+                LaunchResult.fail(
+                    "启动失败：$packageName —— ${t.javaClass.simpleName}: ${t.message}"
+                )
+            }
         }
 
     override suspend fun stop(spaceId: String, packageName: String) {

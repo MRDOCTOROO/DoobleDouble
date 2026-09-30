@@ -2,6 +2,8 @@ package com.dooble.space.ui.screens
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -37,10 +39,12 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -52,13 +56,13 @@ import com.dooble.engine.VirtualApp
 import com.dooble.gms.GmsSignatureSpoof
 import com.dooble.gms.GoogleAccountBridge
 import com.dooble.gms.MicroGComponent
-import com.dooble.gms.OemStack
 import com.dooble.gms.ProvisionPhase
 import com.dooble.gms.SpoofMode
 import com.dooble.gms.StorePhase
 import com.dooble.gms.StoreProvisioner
 import com.dooble.space.ui.SpaceViewModel
 import com.dooble.space.ui.rememberVirtualAppIcon
+import com.dooble.space.ui.components.AppActionSheet
 import com.dooble.space.ui.components.AppIconBadge
 import com.dooble.space.ui.components.AppListAccessBanner
 import com.dooble.space.ui.components.AuroraBackground
@@ -76,8 +80,6 @@ import com.dooble.space.ui.components.GmsSlotPanel
 import com.dooble.space.ui.components.HairlineDivider
 import com.dooble.space.ui.components.HostImportSheet
 import com.dooble.space.ui.components.KeyValueRow
-import com.dooble.space.ui.components.OemSlotPanel
-import com.dooble.space.ui.components.OfficialGoogleNote
 import com.dooble.space.ui.components.SHORTCUT_ROM_CAVEAT
 import com.dooble.space.ui.components.ShortcutSheet
 import com.dooble.space.ui.components.StatusDot
@@ -93,6 +95,7 @@ import com.dooble.space.ui.theme.Success
 import com.dooble.space.ui.theme.Warning
 import com.dooble.space.ui.theme.accentOf
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /** 当前供给的商店包名 */
 private const val STORE_PACKAGE = StoreProvisioner.PRIMARY_PACKAGE
@@ -135,12 +138,11 @@ fun SpaceDetailScreen(
     val slotBusy by vm.slotBusy.collectAsState()
     val hostGooglePackages by vm.hostGooglePackages.collectAsState()
     val hostVisibility by vm.hostVisibility.collectAsState()
-    val isHuaweiDevice by vm.isHuaweiDevice.collectAsState()
 
     var showHostImport by remember { mutableStateOf(false) }
     var showShortcuts by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
-    var pendingUninstall by remember { mutableStateOf<VirtualApp?>(null) }
+    var actionApp by remember { mutableStateOf<VirtualApp?>(null) }
 
     val storeInstalled = apps.any { it.packageName == STORE_PACKAGE }
     val space = spaces.firstOrNull { it.id == spaceId }
@@ -219,14 +221,15 @@ fun SpaceDetailScreen(
         )
     }
 
-    pendingUninstall?.let { target ->
-        UninstallAppDialog(
+    actionApp?.let { target ->
+        AppActionSheet(
             app = target,
-            onDismiss = { pendingUninstall = null },
-            onConfirm = {
-                vm.uninstall(target.packageName)
-                pendingUninstall = null
-            },
+            accent = accent,
+            supported = vm.shortcutsSupported(),
+            onLaunch = { vm.launchApp(target.packageName) },
+            onPin = { vm.pinApp(target) },
+            onUninstall = { vm.uninstall(target.packageName) },
+            onDismiss = { actionApp = null },
         )
     }
 
@@ -256,7 +259,7 @@ fun SpaceDetailScreen(
                 // -------------------------------------------------- 容器桌面
                 GlassSection(
                     title = "容器桌面",
-                    subtitle = "${apps.size} 个应用 · 长按图标可发送到桌面",
+                    subtitle = "${apps.size} 个应用 · 长按图标打开操作菜单 · 双击卸载",
                     icon = Icons.Filled.Star,
                     accent = accent,
                     initiallyExpanded = true,
@@ -281,7 +284,8 @@ fun SpaceDetailScreen(
                                                 accent = accent,
                                                 modifier = Modifier.weight(1f),
                                                 onClick = { vm.launchApp(app.packageName) },
-                                                onLongClick = { vm.pinApp(app) },
+                                                onLongClick = { actionApp = app },
+                                                onDoubleClick = { vm.uninstall(app.packageName) },
                                             )
                                         }
                                         repeat(DESKTOP_COLUMNS - row.size) {
@@ -366,19 +370,6 @@ fun SpaceDetailScreen(
                     )
 
                     Spacer(Modifier.height(10.dp))
-                    OemSlotPanel(
-                        slots = OemStack.HUAWEI_SLOTS,
-                        apps = apps,
-                        hostPackages = hostGooglePackages,
-                        busyPackage = slotBusy,
-                        accent = accent,
-                        actionsEnabled = !busy,
-                        isHuaweiDevice = isHuaweiDevice,
-                        onCloneFromHost = { vm.cloneFromHost(it) },
-                    )
-                    if (isHuaweiDevice) Spacer(Modifier.height(10.dp))
-
-                    OfficialGoogleNote(accent = accent)
                 }
 
                 // -------------------------------------------------- 签名伪造
@@ -599,7 +590,7 @@ fun SpaceDetailScreen(
                 // -------------------------------------------------- 空间内应用
                 GlassSection(
                     title = "空间内应用",
-                    subtitle = "${apps.size} 个应用",
+                    subtitle = "${apps.size} 个应用 · 双击卸载 · 长按打开操作菜单",
                     icon = Icons.Filled.Star,
                     accent = accent,
                     initiallyExpanded = apps.isNotEmpty(),
@@ -619,7 +610,8 @@ fun SpaceDetailScreen(
                                 accent = accent,
                                 onLaunch = { vm.launchApp(app.packageName) },
                                 onStop = { vm.stopApp(app.packageName) },
-                                onUninstall = { pendingUninstall = app },
+                                onLongClick = { actionApp = app },
+                                onDoubleClick = { vm.uninstall(app.packageName) },
                             )
                             Spacer(Modifier.height(8.dp))
                         }
@@ -739,14 +731,19 @@ private fun DesktopTile(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onLongClick: (() -> Unit)? = null,
+    onDoubleClick: (() -> Unit)? = null,
 ) {
     val icon = rememberVirtualAppIcon(app.packageName, app.apkPath, app.versionCode)
+    val (uninstallModifier, requestUninstall) = rememberUninstallAnimation(onDoubleClick)
 
     Column(
-        modifier = modifier.glassClickable(
-            onClick = onClick,
-            onLongClick = onLongClick,
-        ),
+        modifier = modifier
+            .then(uninstallModifier)
+            .glassClickable(
+                onClick = onClick,
+                onLongClick = onLongClick,
+                onDoubleClick = onDoubleClick?.let { { requestUninstall() } },
+            ),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         AppIconBadge(icon = icon, label = app.label, accent = accent, size = 52.dp)
@@ -768,14 +765,20 @@ private fun AppRow(
     accent: Color,
     onLaunch: () -> Unit,
     onStop: () -> Unit,
-    onUninstall: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
+    onDoubleClick: (() -> Unit)? = null,
 ) {
     val icon = rememberVirtualAppIcon(app.packageName, app.apkPath, app.versionCode)
+    val (uninstallModifier, requestUninstall) = rememberUninstallAnimation(onDoubleClick)
 
     GlassCard(
-        Modifier.fillMaxWidth(),
+        Modifier
+            .fillMaxWidth()
+            .then(uninstallModifier),
         shape = RoundedCornerShape(16.dp),
         onClick = onLaunch,
+        onLongClick = onLongClick,
+        onDoubleClick = onDoubleClick?.let { { requestUninstall() } },
         contentPadding = 12.dp,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -814,16 +817,45 @@ private fun AppRow(
                 background = Color.White.copy(alpha = 0.5f),
                 size = 32.dp,
             )
-            GlassIconButton(
-                icon = Icons.Filled.Delete,
-                contentDescription = "卸载",
-                onClick = onUninstall,
-                tint = Danger,
-                background = Color.White.copy(alpha = 0.5f),
-                size = 32.dp,
-            )
         }
     }
+}
+
+/**
+ * 双击卸载的动画辅助：先淡出+缩小，动画结束后才真正调用 onDoubleClick（卸载）。
+ *
+ * 返回 (动画 Modifier, 触发函数)。触发函数只在首次调用时生效，
+ * 防止动画播放期间重复双击导致多次卸载。
+ */
+@Composable
+private fun rememberUninstallAnimation(onDoubleClick: (() -> Unit)?): Pair<Modifier, () -> Unit> {
+    var removing by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val alpha by animateFloatAsState(
+        targetValue = if (removing) 0f else 1f,
+        animationSpec = tween(220),
+        label = "uninstallAlpha",
+    )
+    val scale by animateFloatAsState(
+        targetValue = if (removing) 0.85f else 1f,
+        animationSpec = tween(220),
+        label = "uninstallScale",
+    )
+    val modifier = Modifier.graphicsLayer {
+        this.alpha = alpha
+        scaleX = scale
+        scaleY = scale
+    }
+    val request: () -> Unit = {
+        if (!removing && onDoubleClick != null) {
+            removing = true
+            scope.launch {
+                delay(240)
+                onDoubleClick()
+            }
+        }
+    }
+    return modifier to request
 }
 
 private fun openGuide(context: android.content.Context, target: com.dooble.space.system.AppListAccess.GuideTarget) {
