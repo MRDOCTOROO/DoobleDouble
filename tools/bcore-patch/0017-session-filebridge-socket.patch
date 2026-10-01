@@ -1,0 +1,289 @@
+From: Dooble Double <noreply@example.invalid>
+Subject: [PATCH 0017] 会话式安装自建 FileBridge 对端（socket pair），修复 Collection is empty
+
+Aurora 4.8.4 的 SessionInstaller 在 MuMu 上报
+java.util.NoSuchElementException: Collection is empty（e97.a:296）。
+根因是 PackageInstallerProxy.openWrite 返回普通文件描述符，而框架的
+FileBridgeOutputStream 按 FileBridge 协议写「命令头+载荷」：命令头混进
+会话 APK（文件头 00 00 00 01 00 00 20 00 50 4b 03 04...），且 fsync 没有
+对端回执，libhoudini 抛 Failed to execute fsync() across bridge。
+本补丁把 openWrite 改为返回 socket pair 的客户端，并起 FileBridge 服务线程
+读取 CMD_WRITE/CMD_FSYNC/CMD_CLOSE，还原纯文件字节、回执 fsync/close。
+同时让 Session.abandon 真正清理会话、新建会话时清空旧目录（进程重启后
+发号重置会复用会话号），并保留关键链路的少量诊断日志。
+
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/PackageInstallerProxy.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/PackageInstallerProxy.java
+@@ -172,6 +172,7 @@
+             if (state == null) {
+                 // 系统语义：会话不存在时抛 IllegalArgumentException，
+                 // 这里保持一致，让调用方能走它原本的错误分支
++                Slog.w(TAG, "openSession -> " + id + " MISSING");
+                 throw new IllegalArgumentException("Unknown session " + id);
+             }
+             return state.sessionProxy();
+@@ -356,6 +357,17 @@
+             this.dir = new File(BEnvironment.getCacheDir(), "dooble-session/" + id);
+             //noinspection ResultOfMethodCallIgnored
+             this.dir.mkdirs();
++            // 会话号在容器进程重启后会从固定起点重新发号，同一个数字可能对应
++            // 上一轮进程生命周期里的遗留目录；而历史上 abandon 一直是 no-op，
++            // 目录里可能堆着早前失败安装的碎片文件。新建会话时清空一次，
++            // 避免 commit 时把旧文件一起算进 stagedCount / primaryApk。
++            File[] stale = dir.listFiles();
++            if (stale != null) {
++                for (File f : stale) {
++                    //noinspection ResultOfMethodCallIgnored
++                    f.delete();
++                }
++            }
+         }
+ 
+         File fileFor(String name) {
+@@ -592,7 +604,16 @@
+                 commit(state, args);
+                 return null;
+             }
+-            if ("abandon".equals(name) || "close".equals(name)) {
++            if ("abandon".equals(name)) {
++                // 会话代理的 abandon() 必须真正清理会话（对应 Aurora 等在
++                // 安装失败时调用 Session.abandon() 的路径）。系统语义下
++                // abandon 后会话作废、文件删除，这里保持一致。
++                Slog.w(TAG, "session " + state.id + " abandon -> discard");
++                SessionState removed = SESSIONS.remove(state.id);
++                if (removed != null) removed.discard();
++                return null;
++            }
++            if ("close".equals(name)) {
+                 return null;
+             }
+             if ("asBinder".equals(name)) {
+@@ -619,35 +640,57 @@
+         /**
+          * 写入通道。
+          *
+-         * 直接返回目标文件的写端描述符，不再用管道中转。
++         * <p>框架侧 {@code PackageInstaller.Session.openWrite} 在
++         * {@code fw.revocable_fd} 未开启时（默认）返回的是
++         * {@code FileBridgeOutputStream}：它会把数据按「命令头 + 载荷」的
++         * FileBridge 协议写到本方法返回的 ParcelFileDescriptor 上，由系统侧
++         * 的 FileBridge 服务线程还原成纯文件字节。如果这里直接返回一个指向
++         * 会话文件的普通文件描述符，命令头就会混进 APK 文件（实测文件头出现
++         * {@code 00 00 00 01 00 00 20 00 50 4b 03 04...}），并且 fsync 的
++         * 桥接语义没有对端，最终抛
++         * {@code Failed to execute fsync() across bridge}（MuMu/libhoudini
++         * 限制），Aurora 的 SessionInstaller 因此把安装集合变成空集，
++         * 在 {@code set.first()} 处报 {@code Collection is empty}。
+          *
+-         * 为什么弃用管道：MuMu 翻译层下 {@code ParcelFileDescriptor.createPipe()}
+-         * 的读端 read 会抛 {@code EBADF (Bad file descriptor)}，导致会话式安装
+-         * 写不进任何字节（实测：Aurora 的 SessionInstaller 下载完成后在写 split
+-         * 时抛 EBADF，安装永远停在 INSTALLING）。调用方本来就只负责"写一个流"，
+-         * 写完 close 再 commit，所以让文件描述符直接指向会话目录里的目标文件即可，
+-         * 无需后台搬运线程。
++         * <p>所以这里必须自建 FileBridge 的对端：返回 socket pair 的客户端，
++         * 同时起一个服务线程读取命令、把原始字节写入会话文件，并回执
++         * fsync/close。这样框架侧无需任何改动，会话里落盘的就是干净的 APK。
+          */
+         private static Object openWrite(SessionState state, Object[] args) throws IOException {
+             String name = args != null && args.length > 0 ? (String) args[0] : "base.apk";
+             long offset = args != null && args.length > 1 ? toLong(args[1]) : 0L;
+ 
+             final File target = state.fileFor(name);
+-            int mode = ParcelFileDescriptor.MODE_READ_WRITE | ParcelFileDescriptor.MODE_CREATE;
+-            if (offset == 0) {
+-                mode |= ParcelFileDescriptor.MODE_TRUNCATE;
+-            }
+-            final ParcelFileDescriptor pfd = ParcelFileDescriptor.open(target, mode);
+-            if (offset > 0) {
+-                try {
+-                    android.system.Os.lseek(pfd.getFileDescriptor(),
++
++            final ParcelFileDescriptor[] pair = ParcelFileDescriptor.createSocketPair();
++            final ParcelFileDescriptor client = pair[1];
++            final ParcelFileDescriptor server = pair[0];
++
++            final ParcelFileDescriptor targetFd;
++            try {
++                int mode = ParcelFileDescriptor.MODE_READ_WRITE | ParcelFileDescriptor.MODE_CREATE;
++                if (offset == 0) {
++                    mode |= ParcelFileDescriptor.MODE_TRUNCATE;
++                }
++                targetFd = ParcelFileDescriptor.open(target, mode);
++                if (offset > 0) {
++                    android.system.Os.lseek(targetFd.getFileDescriptor(),
+                             offset, android.system.OsConstants.SEEK_SET);
+-                } catch (android.system.ErrnoException e) {
+-                    pfd.close();
+-                    throw new IOException("lseek failed for " + target.getName(), e);
+-                }
+-            }
+-            return pfd;
++                }
++            } catch (Throwable t) {
++                client.close();
++                server.close();
++                if (t instanceof IOException) throw (IOException) t;
++                throw new IOException("open target failed: " + t, t);
++            }
++
++            FileBridgeServer serverThread =
++                    new FileBridgeServer(state.id, name, server, targetFd, target);
++            serverThread.start();
++
++            Slog.d(TAG, "session " + state.id + " openWrite name=" + name
++                    + " target=" + target + " (FileBridge socket pair)");
++            return client;
+         }
+ 
+         private static Object openRead(SessionState state, Object[] args) throws IOException {
+@@ -732,6 +775,149 @@
+                     notifySessionFinished(sessionId, ok);
+                 }
+             }, "dooble-session-commit").start();
++        }
++    }
++
++    // ------------------------------------------------------------------ FileBridge
++
++    /**
++     * FileBridge 协议的「服务端」。
++     *
++     * <p>框架的 {@code FileBridgeOutputStream} 会把数据按
++     * {@code [CMD(int)][len(int)][payload]} 的格式写进 socket pair 的客户端，
++     * 本线程从服务端读取并还原成原始字节写入会话文件。协议与系统侧
++     * {@code com.android.internal.util.FileBridge} 保持一致：
++     *
++     * <ul>
++     *   <li>{@code CMD_WRITE=1}：随后有 {@code len} 字节原始数据；</li>
++     *   <li>{@code CMD_FSYNC=2}：对目标文件执行 fsync 后回写 8 字节应答；</li>
++     *   <li>{@code CMD_CLOSE=3}：fsync + close + 应答后退出。</li>
++     * </ul>
++     *
++     * fsync 在 MuMu/libhoudini 上无法跨 ARM↔x86 桥执行，这里配合 OsStub 的
++     * fsync no-op（并把真实 fsync 调用本身也包成 no-op），保证协议回执能走完。
++     */
++    static final class FileBridgeServer extends Thread {
++        private static final int CMD_WRITE = 1;
++        private static final int CMD_FSYNC = 2;
++        private static final int CMD_CLOSE = 3;
++        private static final int MSG_LENGTH = 8;
++
++        private final int mSessionId;
++        private final String mName;
++        private final ParcelFileDescriptor mServer;
++        private final ParcelFileDescriptor mTargetFd;
++        private final File mTarget;
++
++        FileBridgeServer(int sessionId, String name,
++                          ParcelFileDescriptor server, ParcelFileDescriptor targetFd, File target) {
++            super("dooble-filebridge-" + sessionId + "-" + name);
++            mSessionId = sessionId;
++            mName = name;
++            mServer = server;
++            mTargetFd = targetFd;
++            mTarget = target;
++        }
++
++        @Override
++        public void run() {
++            final byte[] header = new byte[MSG_LENGTH];
++            final byte[] payload = new byte[8192];
++            java.io.FileOutputStream raw = null;
++            try {
++                raw = new java.io.FileOutputStream(mTargetFd.getFileDescriptor());
++                while (true) {
++                    int got = readFully(header, 0, MSG_LENGTH);
++                    if (got < MSG_LENGTH) {
++                        // 对端关闭，正常结束
++                        break;
++                    }
++                    java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(header);
++                    int cmd = buf.getInt(0);
++                    int len = buf.getInt(4);
++
++                    if (cmd == CMD_WRITE) {
++                        int remaining = len;
++                        while (remaining > 0) {
++                            int r = readFully(payload, 0, Math.min(payload.length, remaining));
++                            if (r <= 0) {
++                                throw new IOException("Unexpected EOF in CMD_WRITE; still expected "
++                                        + remaining + " bytes");
++                            }
++                            raw.write(payload, 0, r);
++                            remaining -= r;
++                        }
++                    } else if (cmd == CMD_FSYNC) {
++                        fsyncQuietly();
++                        writeAck();
++                    } else if (cmd == CMD_CLOSE) {
++                        fsyncQuietly();
++                        //noinspection EmptyTryBlock
++                        try {
++                            mTargetFd.close();
++                        } catch (Throwable ignored) {
++                        }
++                        writeAck();
++                        break;
++                    } else {
++                        Slog.w(TAG, "session " + mSessionId + " FileBridge unknown cmd=" + cmd
++                                + " name=" + mName);
++                        break;
++                    }
++                }
++            } catch (Throwable t) {
++                Slog.w(TAG, "session " + mSessionId + " FileBridge server for " + mName
++                        + " died: " + t);
++            } finally {
++                if (raw != null) {
++                    try {
++                        raw.close();
++                    } catch (Throwable ignored) {
++                    }
++                }
++                try {
++                    mServer.close();
++                } catch (Throwable ignored) {
++                }
++            }
++        }
++
++        private int readFully(byte[] buffer, int off, int len) throws IOException {
++            int total = 0;
++            while (total < len) {
++                int n;
++                try {
++                    n = android.system.Os.read(mServer.getFileDescriptor(), buffer, off + total, len - total);
++                } catch (android.system.ErrnoException e) {
++                    throw new IOException("read failed errno=" + e.errno, e);
++                }
++                if (n < 0) {
++                    throw new IOException("read failed: " + android.system.OsConstants.EIO);
++                }
++                if (n == 0) {
++                    break;
++                }
++                total += n;
++            }
++            return total;
++        }
++
++        private void writeAck() throws IOException {
++            byte[] ack = java.nio.ByteBuffer.allocate(MSG_LENGTH)
++                    .putInt(0).putInt(0).array();
++            try {
++                android.system.Os.write(mServer.getFileDescriptor(), ack, 0, ack.length);
++            } catch (android.system.ErrnoException e) {
++                throw new IOException("write ack failed errno=" + e.errno, e);
++            }
++        }
++
++        private void fsyncQuietly() {
++            try {
++                android.system.Os.fsync(mTargetFd.getFileDescriptor());
++            } catch (Throwable t) {
++                Slog.d(TAG, "session " + mSessionId + " FileBridge fsync ignored: " + t);
++            }
+         }
+     }
+ 

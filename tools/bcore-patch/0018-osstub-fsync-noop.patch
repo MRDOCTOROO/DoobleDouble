@@ -1,0 +1,52 @@
+From: Dooble Double <noreply@example.invalid>
+Subject: [PATCH 0018] OsStub 增加 fsync/fdatasync no-op（libhoudini 无法跨桥）
+
+MuMu 的 libhoudini（ARM 翻译层）无法跨 ARM↔x86 桥执行 fsync()，容器内
+PackageInstaller 会话式安装会在 Os.fsync 处抛
+Failed to execute fsync() across bridge。把 OsStub（代理
+libcore.io.Libcore.os 单例）的 fsync/fdatasync 改成 no-op，让会话写入链路
+的回执能走完。配合 0017 的 FileBridge 对端，真实设备上会话文件是干净的
+ZIP；MuMu 上 Aurora 已切换原生安装程序，会话式不再使用。
+
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/libcore/OsStub.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/libcore/OsStub.java
+@@ -12,6 +12,7 @@
+ import top.niunaijun.blackbox.fake.hook.MethodHook;
+ import top.niunaijun.blackbox.fake.hook.ProxyMethod;
+ import top.niunaijun.blackbox.utils.Reflector;
++import top.niunaijun.blackbox.utils.Slog;
+ 
+ 
+ public class OsStub extends ClassInvocationStub {
+@@ -59,6 +60,31 @@
+         return super.invoke(proxy, method, args);
+     }
+ 
++    @ProxyMethod("fsync")
++    public static class fsync extends MethodHook {
++
++        @Override
++        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
++            // MuMu 的 libhoudini(ARM 翻译层)无法跨 ARM↔x86 桥执行 fsync，
++            // 容器内 PackageInstaller 会话式安装会在这里抛
++            // "Failed to execute fsync() across bridge"，导致 Aurora 的
++            // SessionInstaller 在 set.first() 处报 Collection is empty。
++            // 这里把 Os.fsync 变成 no-op，让会话写入链路走完。
++            Slog.d(TAG, "fsync no-op (libhoudini cannot fsync across bridge)");
++            return null;
++        }
++    }
++
++    @ProxyMethod("fdatasync")
++    public static class fdatasync extends MethodHook {
++
++        @Override
++        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
++            Slog.d(TAG, "fdatasync no-op (libhoudini cannot fsync across bridge)");
++            return null;
++        }
++    }
++
+     @ProxyMethod("getuid")
+     public static class getuid extends MethodHook {
+ 

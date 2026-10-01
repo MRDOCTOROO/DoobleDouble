@@ -1,8 +1,10 @@
 package com.dooble.gms
 
 import android.content.Context
+import android.util.Log
 import com.dooble.engine.VirtualApp
 import com.dooble.engine.VirtualEngine
+import com.dooble.engine.internal.BcoreStorageLayout
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -67,6 +69,9 @@ class StoreProvisioner(
 
         val already = engine.listApps(spaceId).firstOrNull { it.packageName in STORE_PACKAGES }
         if (already != null) {
+            // 空间里已经有商店：也顺势把安装方式钉到「原生安装程序」。
+            // 见 configureAuroraInstaller 的注释。
+            configureAuroraInstaller(spaceId)
             onStep(StoreStep(StorePhase.DONE, "商店已存在：${already.label}", 1f))
             return@withContext StoreReport(spaceId, true, already, "商店已在空间内")
         }
@@ -87,6 +92,10 @@ class StoreProvisioner(
                     message = "装入失败：${t.message}",
                 )
             }
+
+        // 装入成功后把 Aurora 的安装方式钉到「原生安装程序」。
+        // 见 configureAuroraInstaller 的注释。
+        configureAuroraInstaller(spaceId)
 
         onStep(StoreStep(StorePhase.DONE, "已装入：${app.label}", 1f))
         StoreReport(spaceId, true, app, "已装入 ${app.label}")
@@ -125,6 +134,62 @@ class StoreProvisioner(
             },
         )
 
+    /**
+     * 把 Aurora Store 的安装方式钉到「原生安装程序」（Installer.NATIVE，ordinal=1）。
+     *
+     * ## 为什么必须这么做
+     *
+     * MuMu 的 libhoudini 无法跨桥执行 `fsync()`。Aurora 默认的会话式安装
+     * （PackageInstaller.Session）在写入分片时会抛
+     * `NoSuchElementException: Collection is empty`——根因是容器代理的
+     * `openWrite` 返回普通文件 PFD，框架 FileBridgeOutputStream 把命令头写进
+     * 会话文件（APK 头被污染），fsync 又没有对端回执；即便容器侧已修复
+     * FileBridge 协议，libhoudini 仍会在 Aurora 关闭源文件时再次触发跨桥
+     * fsync 失败。因此 MuMu 上会话式安装不可用。
+     *
+     * 切到「原生安装程序」后 Aurora 走 `ACTION_INSTALL_PACKAGE` 意图式安装，
+     * 配合容器补丁 0010（`isRequestInstall` 识别该 action）可稳定装入当前空间，
+     * 不依赖 libhoudini 的 fsync。这是 AGENTS.md 里实测可用路径的程序化落地。
+     *
+     * Aurora 的 `Preferences.getPrefs` 在 vanilla flavor 下用
+     * `PreferenceManager.getDefaultSharedPreferences`，即
+     * `com.aurora.store_preferences.xml`；`PREFERENCE_INSTALLER_ID` 取
+     * `Installer` 枚举的 ordinal：SESSION=0、NATIVE=1。
+     */
+    private fun configureAuroraInstaller(spaceId: String) {
+        val userId = engine.space(spaceId)?.bcoreUserId ?: return
+        if (userId <= 0) return
+        val prefsDir = File(
+            File(BcoreStorageLayout.userDir(context.dataDir, userId), PRIMARY_PACKAGE),
+            "shared_prefs",
+        )
+        val prefsFile = File(prefsDir, "${PRIMARY_PACKAGE}_preferences.xml")
+        val key = "PREFERENCE_INSTALLER_ID"
+        val desired = "<int name=\"$key\" value=\"1\" />"
+        try {
+            prefsDir.mkdirs()
+            val content = if (prefsFile.exists()) {
+                prefsFile.readText()
+            } else {
+                "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<map>\n</map>\n"
+            }
+            val updated = when {
+                !content.contains(key) -> content.replace("</map>", "    $desired\n</map>")
+                content.contains(desired) -> content
+                else -> content.replace(
+                    Regex("<int name=\"$key\" value=\"\\d+\" />"),
+                    desired,
+                )
+            }
+            if (updated != content) {
+                prefsFile.writeText(updated)
+                Log.i(TAG, "Aurora installer set to NATIVE for space $spaceId")
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "failed to configure Aurora native installer: $t")
+        }
+    }
+
     /** 清掉缓存（换版本或下载损坏时用） */
     fun clearCache() {
         cacheDir.listFiles()?.forEach { it.delete() }
@@ -137,6 +202,8 @@ class StoreProvisioner(
     }
 
     companion object {
+        private const val TAG = "StoreProvisioner"
+
         /**
          * 当前供给的商店包名。UI 用它判断空间里有没有商店。
          *

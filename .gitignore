@@ -53,6 +53,7 @@ local.properties
 
 # 生成补丁时的中间快照（tools 里的 .patch 才是产物，这些只是工作目录）
 /local/patchgen/
+/local/
 
 # 真实 Google 平台证书：合规红线，永不入库
 # tools/extract-gms-cert.sh 从使用者自备的 GMS APK 里导出它，产物落在
