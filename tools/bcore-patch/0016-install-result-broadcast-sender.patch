@@ -1,0 +1,114 @@
+From: Dooble Double <noreply@example.invalid>
+Subject: [PATCH 0016] 容器安装结果回传 + 广播 PendingIntent 投递
+
+修复两类「装完商店不刷新」：
+
+1. F-Droid 旧安装器（forceOldInstaller=true）走 DefaultInstallerActivity +
+   startActivityForResult(ACTION_INSTALL_PACKAGE) 等 RESULT_OK 回传，而容器
+   StartActivity 钩子拦截安装 intent 后只调 requestInstallPackage 就返回 0，
+   结果永远不回来，DefaultInstallerActivity 的 onActivityResult 不触发，
+   ACTION_INSTALL_COMPLETE 广播也就永远不发，F-Droid UI 检测不到已安装。
+   补丁在容器装完后用 BRActivityThread.sendActivityResult() 把 RESULT_OK
+   直接投递给调用方 Activity，驱动安装完成广播。
+
+2. 会话式安装（Aurora SessionInstaller / F-Droid SessionInstallManager）的
+   commit 结果通过 PendingIntent 广播（IntentSender）回传。Bcore 的
+   GetIntentSender 钩子只包装了 ACTIVITY 类型，广播类型的 PendingIntent
+   仍指向虚拟包接收器，真实 AMS 解析不到虚拟组件，状态永远回不来。补丁：
+   - GetIntentSender 对 INTENT_SENDER_BROADCAST 做同样的宿主包装（shadow
+     指向宿主 ProxyBroadcastReceiver + 保存 stub）；
+   - ProxyBroadcastRecord.create 把实际广播携带的 extras（EXTRA_STATUS、
+     EXTRA_SESSION_ID 等）合并回原始 intent，接收器看到与真实广播一致
+     的语义。
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/ActivityManagerCommonProxy.java b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/ActivityManagerCommonProxy.java
+index b3194c2..15d4e95 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/ActivityManagerCommonProxy.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/ActivityManagerCommonProxy.java
+@@ -64,6 +64,7 @@ public class ActivityManagerCommonProxy {
+                 }
+                 
+                 if (BlackBoxCore.get().requestInstallPackage(file, BActivityThread.getUserId())) {
++                    deliverInstallResult(args, android.app.Activity.RESULT_OK, null);
+                     return 0;
+                 }
+                 intent.setData(FileProviderHandler.convertFileUri(BActivityThread.getApplication(), intent.getData()));
+@@ -435,4 +436,24 @@ public class ActivityManagerCommonProxy {
+             return BlackBoxCore.getBActivityManager().getCallingActivity((IBinder) args[0], BActivityThread.getUserId());
+         }
+     }
++
++    /**
++     * Dooble: 容器拦截 ACTION_INSTALL_PACKAGE 并同步装好 APK 后，
++     * 把 RESULT_OK 回传给调用方（如 F-Droid DefaultInstallerActivity 的
++     * startActivityForResult），驱动安装完成广播。
++     */
++    static void deliverInstallResult(Object[] args, int resultCode, Intent data) {
++        try {
++            IBinder resultTo = StartActivityCompat.getResultTo(args);
++            if (resultTo == null) {
++                return;
++            }
++            String resultWho = StartActivityCompat.getResultWho(args);
++            int requestCode = StartActivityCompat.getRequestCode(args);
++            black.android.app.BRActivityThread.get(BlackBoxCore.mainThread())
++                    .sendActivityResult(resultTo, resultWho, requestCode, resultCode, data);
++        } catch (Throwable t) {
++            Slog.w(TAG, "deliverInstallResult failed: " + t);
++        }
++    }
+ }
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IActivityManagerProxy.java b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IActivityManagerProxy.java
+index 3606fea..e446c29 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IActivityManagerProxy.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IActivityManagerProxy.java
+@@ -512,6 +512,14 @@ public class IActivityManagerProxy extends ClassInvocationStub {
+                         ProxyPendingRecord.saveStub(shadow, intent, BActivityThread.getUserId());
+                         intents[i] = shadow;
+                         break;
++                    case ActivityManagerCompat.INTENT_SENDER_BROADCAST:
++                        Intent shadowBroadcast = new Intent();
++                        shadowBroadcast.setPackage(BlackBoxCore.getHostPkg());
++                        shadowBroadcast.setComponent(null);
++                        shadowBroadcast.setAction(intent.getAction());
++                        ProxyBroadcastRecord.saveStub(shadowBroadcast, intent, BActivityThread.getUserId());
++                        intents[i] = shadowBroadcast;
++                        break;
+                 }
+             }
+             IInterface invoke = (IInterface) method.invoke(who, args);
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/proxy/record/ProxyBroadcastRecord.java b/Bcore/src/main/java/top/niunaijun/blackbox/proxy/record/ProxyBroadcastRecord.java
+index b857aaa..3b39f8f 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/proxy/record/ProxyBroadcastRecord.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/proxy/record/ProxyBroadcastRecord.java
+@@ -1,6 +1,7 @@
+ package top.niunaijun.blackbox.proxy.record;
+ 
+ import android.content.Intent;
++import android.os.Bundle;
+ 
+ 
+ public class ProxyBroadcastRecord {
+@@ -20,6 +21,23 @@ public class ProxyBroadcastRecord {
+     public static ProxyBroadcastRecord create(Intent intent) {
+         Intent target = intent.getParcelableExtra("_B_|_target_");
+         int userId = intent.getIntExtra("_B_|_user_id_", 0);
++        if (target != null) {
++            Bundle extras = intent.getExtras();
++            if (extras != null) {
++                extras.remove("_B_|_target_");
++                extras.remove("_B_|_user_id_");
++                target.putExtras(extras);
++            }
++            if (target.getAction() == null && intent.getAction() != null) {
++                target.setAction(intent.getAction());
++            }
++            if (target.getData() == null && intent.getData() != null) {
++                target.setData(intent.getData());
++            }
++            if (target.getType() == null && intent.getType() != null) {
++                target.setType(intent.getType());
++            }
++        }
+         return new ProxyBroadcastRecord(target, userId);
+     }
+ 

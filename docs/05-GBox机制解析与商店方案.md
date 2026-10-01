@@ -288,6 +288,24 @@ Aurora 等商店除了收 `IntentSender` 广播，还用
 - `commit` 完成（含失败早退）在 `sendStatus` 之后触发 `onSessionFinished`——
   广播先到、回调后到，商店先刷新列表再推进队列，两个通道互不替代。
 
+#### 安装结果的两条回传通道（补丁 0016 补全）
+
+商店的安装完成要经过两条通道，缺一不可：
+
+1. **IntentSender 广播**（会话安装器都依赖）：Aurora 的
+   `InstallerStatusReceiver` 和 F-Droid 的 `SessionInstallManager` 都用
+   `PendingIntent.getBroadcast()` 创建 commit 用的 IntentSender。容器
+   `GetIntentSender` 钩子原来只包装 ACTIVITY 类型的 PendingIntent，
+   广播类型的仍指向虚拟包接收器，真实 AMS 投不回来。0016 给
+   `INTENT_SENDER_BROADCAST` 做同样的宿主包装，并在
+   `ProxyBroadcastRecord.create` 里把实际广播携带的
+   `EXTRA_STATUS` / `EXTRA_SESSION_ID` 等合并回原始 intent。
+2. **`startActivityForResult` 结果**（F-Droid 旧安装器
+   `DefaultInstallerActivity`）：容器拦截 `ACTION_INSTALL_PACKAGE` 后直接装
+   完，原来不投递结果。0016 用 `BRActivityThread.sendActivityResult()` 把
+   `RESULT_OK` 回传给调用方，`onActivityResult` 才会发
+   `ACTION_INSTALL_COMPLETE`。
+
 挂载点选得很取巧——不需要动系统服务表：
 
 ```java

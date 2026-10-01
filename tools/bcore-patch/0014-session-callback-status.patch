@@ -13,13 +13,14 @@ PackageInstallerProxy 的 registerSessionCallback 钩子直接返回 null，既�
 1. registerSessionCallback 捕获 IPackageInstallerCallback binder（Set 去重），
    unregisterSessionCallback 同步移除；
 2. 新增 GetSessionInfo 钩子，用反射构造真实的 SessionInfo（私有构造器+隐藏
-   字段），满足 SessionCallbackDelegate.onSessionCreated 反查会话的要求；
+   字段），并补上 mAppPackageName / mAppLabel / mSizeBytes / mCreatedMillis，
+   让回调方能从 sessionInfo.appPackageName 关联到具体应用；
 3. createSession 在 SESSIONS.put 之后触发 onSessionCreated（顺序不能反，
    delegate 会立刻 getSessionInfo）；
 4. commit 完成（含失败早退路径）在 sendStatus 之后触发 onSessionFinished——
    广播先到、回调后到，商店先刷新列表再推进队列，两个通道互不替代。
 diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/PackageInstallerProxy.java b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/PackageInstallerProxy.java
-index 7004ced..a883fef 100644
+index 7004ced..6e44199 100644
 --- a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/PackageInstallerProxy.java
 +++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/PackageInstallerProxy.java
 @@ -81,6 +81,23 @@ public class PackageInstallerProxy extends ClassInvocationStub {
@@ -54,8 +55,11 @@ index 7004ced..a883fef 100644
          addMethodHook(new Uninstall());
          addMethodHook(new UninstallExisting());
          addMethodHook(new UpdateSessionAppIcon());
-@@ -137,6 +155,9 @@ public class PackageInstallerProxy extends ClassInvocationStub {
+@@ -135,8 +153,12 @@ public class PackageInstallerProxy extends ClassInvocationStub {
+         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+             int id = NEXT_SESSION_ID.incrementAndGet();
              SessionState state = new SessionState(id);
++            SessionState.readSessionParams(state, args);
              SESSIONS.put(id, state);
              Slog.d(TAG, "createSession -> " + id + " dir=" + state.dir);
 +            // 必须先 put 再通知：SessionCallbackDelegate 收到 onSessionCreated
@@ -64,7 +68,7 @@ index 7004ced..a883fef 100644
              return id;
          }
      }
-@@ -226,12 +247,30 @@ public class PackageInstallerProxy extends ClassInvocationStub {
+@@ -226,12 +248,30 @@ public class PackageInstallerProxy extends ClassInvocationStub {
          }
      }
  
@@ -97,7 +101,7 @@ index 7004ced..a883fef 100644
              return null;
          }
      }
-@@ -240,6 +279,9 @@ public class PackageInstallerProxy extends ClassInvocationStub {
+@@ -240,6 +280,9 @@ public class PackageInstallerProxy extends ClassInvocationStub {
      public static class UnregisterSessionCallback extends MethodHook {
          @Override
          protected Object hook(Object who, Method method, Object[] args) throws Throwable {
@@ -107,10 +111,45 @@ index 7004ced..a883fef 100644
              return null;
          }
      }
-@@ -364,6 +406,43 @@ public class PackageInstallerProxy extends ClassInvocationStub {
+@@ -301,6 +344,10 @@ public class PackageInstallerProxy extends ClassInvocationStub {
+         /** commit 只允许生效一次：重复提交在系统语义下是错误，重复安装则是事故 */
+         final java.util.concurrent.atomic.AtomicBoolean committed =
+                 new java.util.concurrent.atomic.AtomicBoolean(false);
++        /** 调用方声明的包名（来自 SessionParams，回调里给商店关联应用用） */
++        String packageName;
++        /** 调用方声明的应用名（可选） */
++        String appLabel;
+ 
+         private Object mProxy;
+ 
+@@ -364,6 +411,78 @@ public class PackageInstallerProxy extends ClassInvocationStub {
              }
          }
  
++        /** 从 createSession 的 SessionParams 里读出包名/应用名（方法名各版本稳定） */
++        static void readSessionParams(SessionState state, Object[] args) {
++            if (args == null || args.length == 0 || args[0] == null) {
++                return;
++            }
++            try {
++                Class<?> paramsClass = args[0].getClass();
++                java.lang.reflect.Method getPkg = paramsClass.getMethod("getAppPackageName");
++                Object pkg = getPkg.invoke(args[0]);
++                if (pkg instanceof String) {
++                    state.packageName = (String) pkg;
++                }
++                try {
++                    java.lang.reflect.Method getLabel = paramsClass.getMethod("getAppLabel");
++                    Object label = getLabel.invoke(args[0]);
++                    if (label instanceof CharSequence) {
++                        state.appLabel = ((CharSequence) label).toString();
++                    }
++                } catch (Throwable ignored) {
++                }
++            } catch (Throwable ignored) {
++            }
++        }
++
 +        /**
 +         * 构造一个与框架同源的 {@code PackageInstaller.SessionInfo}。
 +         *
@@ -141,6 +180,17 @@ index 7004ced..a883fef 100644
 +                setField(cls, info, "mProgress", 1.0d);
 +                setField(cls, info, "mSealed", committed.get());
 +                setField(cls, info, "mMode", PackageInstaller.SessionParams.MODE_FULL_INSTALL);
++                if (packageName != null) {
++                    setField(cls, info, "mAppPackageName", packageName);
++                }
++                if (appLabel != null) {
++                    setField(cls, info, "mAppLabel", appLabel);
++                }
++                File apk = primaryApk();
++                if (apk != null) {
++                    setField(cls, info, "mSizeBytes", apk.length());
++                }
++                setField(cls, info, "mCreatedMillis", System.currentTimeMillis());
 +                return info;
 +            } catch (Throwable t) {
 +                Slog.w(TAG, "sessionInfo failed for " + id + ": " + t);
@@ -151,7 +201,7 @@ index 7004ced..a883fef 100644
          void discard() {
              synchronized (files) {
                  for (File f : files.values()) {
-@@ -567,6 +646,7 @@ public class PackageInstallerProxy extends ClassInvocationStub {
+@@ -567,6 +686,7 @@ public class PackageInstallerProxy extends ClassInvocationStub {
                          state.discard();
                          sendStatus(sender, sessionId, PackageInstaller.STATUS_FAILURE_INVALID,
                                  "会话里没有任何数据", null);
@@ -159,7 +209,7 @@ index 7004ced..a883fef 100644
                          return;
                      }
  
-@@ -606,6 +686,10 @@ public class PackageInstallerProxy extends ClassInvocationStub {
+@@ -606,6 +726,10 @@ public class PackageInstallerProxy extends ClassInvocationStub {
                      sendStatus(sender, sessionId,
                              ok ? PackageInstaller.STATUS_SUCCESS : PackageInstaller.STATUS_FAILURE,
                              message, packageName);
@@ -170,7 +220,7 @@ index 7004ced..a883fef 100644
                  }
              }, "dooble-session-commit").start();
          }
-@@ -641,6 +725,67 @@ public class PackageInstallerProxy extends ClassInvocationStub {
+@@ -641,6 +765,67 @@ public class PackageInstallerProxy extends ClassInvocationStub {
          }
      }
  
