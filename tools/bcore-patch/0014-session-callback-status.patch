@@ -1,0 +1,240 @@
+From: Dooble Double <noreply@example.invalid>
+Subject: [PATCH 0014] 补全容器 PackageInstaller 会话回调（修复商店安装状态不同步）
+
+Aurora Store 等商店用 PackageInstaller.registerSessionCallback() 驱动安装队列：
+会话创建/完成时会收到 onSessionCreated/onSessionFinished 回调，商店据此把
+「正在安装中」推进到「已安装/失败」。容器没有系统会话服务，之前
+PackageInstallerProxy 的 registerSessionCallback 钩子直接返回 null，既不保存
+回调对象也不触发任何回调——于是商店的会话状态机永远停在「正在安装中」，
+即使 APK 已经通过 sendStatus 广播装好并出现在桌面，商店 UI 也不会刷新。
+
+本补丁补全容器侧的会话回调链路：
+
+1. registerSessionCallback 捕获 IPackageInstallerCallback binder（Set 去重），
+   unregisterSessionCallback 同步移除；
+2. 新增 GetSessionInfo 钩子，用反射构造真实的 SessionInfo（私有构造器+隐藏
+   字段），满足 SessionCallbackDelegate.onSessionCreated 反查会话的要求；
+3. createSession 在 SESSIONS.put 之后触发 onSessionCreated（顺序不能反，
+   delegate 会立刻 getSessionInfo）；
+4. commit 完成（含失败早退路径）在 sendStatus 之后触发 onSessionFinished——
+   广播先到、回调后到，商店先刷新列表再推进队列，两个通道互不替代。
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/PackageInstallerProxy.java b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/PackageInstallerProxy.java
+index 7004ced..a883fef 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/PackageInstallerProxy.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/PackageInstallerProxy.java
+@@ -81,6 +81,23 @@ public class PackageInstallerProxy extends ClassInvocationStub {
+ 
+     private static final Map<Integer, SessionState> SESSIONS = new ConcurrentHashMap<>();
+ 
++    /**
++     * 已注册的 {@code IPackageInstallerCallback} 回调对象。
++     *
++     * <p>框架侧 {@code PackageInstaller.registerSessionCallback()} 最终会把一个
++     * {@code SessionCallbackDelegate}（实现 {@code IPackageInstallerCallback} 的
++     * Binder Stub）传进来。容器没有系统会话服务，回调不会由系统触发，所以这里
++     * 捕获注册的回调对象，等会话提交完成时由本代理主动触发
++     * {@code onSessionFinished(sessionId, success)}，驱动 Aurora 等商店的安装队列
++     * 前进（安装完成广播仍走 {@code sendStatus}，两条通道互不替代）。
++     *
++     * <p>用 {@code Set} 去重：同一个 delegate 可能被同一进程里的多个 Context 重复
++     * 注册（PackageManager 缓存会复用同一个 PackageInstaller 对象，但回调 handler
++     * 可能不同），重复触发会造成商店状态机收到两次完成事件。
++     */
++    private static final java.util.Set<Object> CALLBACKS =
++            Collections.synchronizedSet(new java.util.HashSet<Object>());
++
+     /** 所有会话代理共用，用于满足框架可能调用的 asBinder() */
+     private static final IBinder PLACEHOLDER_BINDER = new Binder();
+ 
+@@ -119,6 +136,7 @@ public class PackageInstallerProxy extends ClassInvocationStub {
+         addMethodHook(new AbandonSession());
+         addMethodHook(new GetMySessions());
+         addMethodHook(new GetAllSessions());
++        addMethodHook(new GetSessionInfo());
+         addMethodHook(new Uninstall());
+         addMethodHook(new UninstallExisting());
+         addMethodHook(new UpdateSessionAppIcon());
+@@ -137,6 +155,9 @@ public class PackageInstallerProxy extends ClassInvocationStub {
+             SessionState state = new SessionState(id);
+             SESSIONS.put(id, state);
+             Slog.d(TAG, "createSession -> " + id + " dir=" + state.dir);
++            // 必须先 put 再通知：SessionCallbackDelegate 收到 onSessionCreated
++            // 后会立刻调 getSessionInfo(id)，那时 SESSIONS 里必须已经有该会话
++            notifySessionCreated(id);
+             return id;
+         }
+     }
+@@ -226,12 +247,30 @@ public class PackageInstallerProxy extends ClassInvocationStub {
+         }
+     }
+ 
++    @ProxyMethod("getSessionInfo")
++    public static class GetSessionInfo extends MethodHook {
++        @Override
++        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
++            int id = toInt(args[0]);
++            SessionState state = SESSIONS.get(id);
++            if (state == null) {
++                return null;
++            }
++            return state.sessionInfo();
++        }
++    }
++
+     @ProxyMethod("registerSessionCallback")
+     public static class RegisterSessionCallback extends MethodHook {
+         @Override
+         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+-            // 容器的会话不产生系统回调，注册个空实现即可，
+-            // 但不能放行——宿主会按 userId 校验并抛异常
++            // 参数是 IPackageInstallerCallback binder（SessionCallback 内部的 Stub）。
++            // 捕获它，等会话提交完成后由容器触发 onSessionFinished/onSessionSealed，
++            // 驱动 Aurora 等商店的安装队列前进（UI 变"已安装"仍靠 sendStatus 广播）。
++            if (args != null && args.length > 0 && args[0] != null) {
++                CALLBACKS.add(args[0]);
++                Slog.d(TAG, "registerSessionCallback -> " + args[0]);
++            }
+             return null;
+         }
+     }
+@@ -240,6 +279,9 @@ public class PackageInstallerProxy extends ClassInvocationStub {
+     public static class UnregisterSessionCallback extends MethodHook {
+         @Override
+         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
++            if (args != null && args.length > 0) {
++                CALLBACKS.remove(args[0]);
++            }
+             return null;
+         }
+     }
+@@ -364,6 +406,43 @@ public class PackageInstallerProxy extends ClassInvocationStub {
+             }
+         }
+ 
++        /**
++         * 构造一个与框架同源的 {@code PackageInstaller.SessionInfo}。
++         *
++         * <p>为什么要反射造对象而不是直接 new：{@code SessionInfo} 的构造器是包内
++         * 私有，字段也全是隐藏的，只能在运行期用反射实例化并填字段。调用方
++         * （框架的 {@code SessionCallbackDelegate.onSessionCreated}、商店的
++         * {@code PackageInstaller.getSessionInfo()}）只读 {@code getSessionId()}
++         * 之类的方法，所以只要把关键字段填对即可。
++         *
++         * <p>构造失败时返回 {@code null}——回调方拿到的 {@code SessionInfo} 为空
++         * 时会走它们自己的空分支（Aurora 对 null session 有兜底），不会崩溃。
++         */
++        Object sessionInfo() {
++            try {
++                Class<?> cls = Class.forName("android.content.pm.PackageInstaller$SessionInfo");
++                java.lang.reflect.Constructor<?> ctor = cls.getDeclaredConstructor();
++                ctor.setAccessible(true);
++                Object info = ctor.newInstance();
++
++                setField(cls, info, "mSessionId", id);
++                String installerPkg = BActivityThread.getAppPackageName();
++                if (installerPkg == null && BlackBoxCore.getContext() != null) {
++                    installerPkg = BlackBoxCore.getContext().getPackageName();
++                }
++                setField(cls, info, "mInstallerPackageName",
++                        installerPkg != null ? installerPkg : "com.android.vending");
++                setField(cls, info, "mActive", false);
++                setField(cls, info, "mProgress", 1.0d);
++                setField(cls, info, "mSealed", committed.get());
++                setField(cls, info, "mMode", PackageInstaller.SessionParams.MODE_FULL_INSTALL);
++                return info;
++            } catch (Throwable t) {
++                Slog.w(TAG, "sessionInfo failed for " + id + ": " + t);
++                return null;
++            }
++        }
++
+         void discard() {
+             synchronized (files) {
+                 for (File f : files.values()) {
+@@ -567,6 +646,7 @@ public class PackageInstallerProxy extends ClassInvocationStub {
+                         state.discard();
+                         sendStatus(sender, sessionId, PackageInstaller.STATUS_FAILURE_INVALID,
+                                 "会话里没有任何数据", null);
++                        notifySessionFinished(sessionId, false);
+                         return;
+                     }
+ 
+@@ -606,6 +686,10 @@ public class PackageInstallerProxy extends ClassInvocationStub {
+                     sendStatus(sender, sessionId,
+                             ok ? PackageInstaller.STATUS_SUCCESS : PackageInstaller.STATUS_FAILURE,
+                             message, packageName);
++                    // 回调是商店「安装中 → 已安装/失败」状态机的驱动点，
++                    // 必须在 sendStatus 之后触发（顺序上广播先到、回调后到，
++                    // 商店先刷新列表再推进队列，不会出现竞态缺口）
++                    notifySessionFinished(sessionId, ok);
+                 }
+             }, "dooble-session-commit").start();
+         }
+@@ -641,6 +725,67 @@ public class PackageInstallerProxy extends ClassInvocationStub {
+         }
+     }
+ 
++    /**
++     * 通知所有已注册的回调：会话已创建。
++     *
++     * <p>框架的 {@code SessionCallbackDelegate.onSessionCreated(int)} 会反过来调
++     * {@code PackageInstaller.getSessionInfo(sessionId)} 构造用户侧回调参数，
++     * 因此必须先让 {@code SESSIONS} 里能查到该会话（{@link #GetSessionInfo} 钩子
++     * 会命中），本方法必须在 {@code SESSIONS.put(id, state)} 之后调用。
++     */
++    private static void notifySessionCreated(int sessionId) {
++        invokeCallback("onSessionCreated", new Class<?>[]{int.class},
++                new Object[]{sessionId});
++    }
++
++    /**
++     * 通知所有已注册的回调：会话已结束。
++     *
++     * <p>这是商店「安装中 → 已安装/失败」状态机的关键驱动点。系统服务会在
++     * commit 完成后触发同一回调，容器没有系统会话服务，必须由本代理补上。
++     */
++    private static void notifySessionFinished(int sessionId, boolean success) {
++        invokeCallback("onSessionFinished", new Class<?>[]{int.class, boolean.class},
++                new Object[]{sessionId, success});
++    }
++
++    /**
++     * 在 {@code CALLBACKS} 上逐个反射调用指定方法。
++     *
++     * <p>回调对象是框架的 {@code IPackageInstallerCallback} Stub，方法签名在各
++     * Android 版本上稳定（onSessionCreated(int) / onSessionFinished(int, boolean)）。
++     * 因为类是隐藏接口的 Binder 实现，直接用反射找公开方法即可。
++     */
++    private static void invokeCallback(String name, Class<?>[] types, Object[] args) {
++        Object[] snapshot;
++        synchronized (CALLBACKS) {
++            snapshot = CALLBACKS.toArray();
++        }
++        if (snapshot.length == 0) return;
++        for (Object cb : snapshot) {
++            if (cb == null) continue;
++            try {
++                Method m = cb.getClass().getMethod(name, types);
++                m.invoke(cb, args);
++            } catch (Throwable t) {
++                Slog.w(TAG, "callback " + name + " failed: " + t);
++            }
++        }
++    }
++
++    /**
++     * 反射设置 {@code PackageInstaller.SessionInfo} 的私有字段。
++     */
++    private static void setField(Class<?> cls, Object target, String name, Object value) {
++        try {
++            java.lang.reflect.Field f = cls.getDeclaredField(name);
++            f.setAccessible(true);
++            f.set(target, value);
++        } catch (Throwable t) {
++            Slog.w(TAG, "setField " + name + " failed: " + t);
++        }
++    }
++
+     private static String packageNameOf(Object versionedPackage) {
+         if (versionedPackage == null) return null;
+         if (versionedPackage instanceof String) return (String) versionedPackage;

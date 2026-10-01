@@ -1,0 +1,64 @@
+From: Dooble Double <noreply@example.invalid>
+Subject: [PATCH 0015] 容器 DNS 配置改为透传真实系统 DNS（修复容器内应用 DNS 解析异常）
+
+Bcore 的 IConnectivityManagerProxy.GetDnsServers 钩子无条件返回
+8.8.8.8/8.8.4.4，把容器内调用 ConnectivityManager.getDnsServers() 的应用
+的解析服务器硬编码成 Google Public DNS。在 Google DNS 不可达的网络
+（国内运营商环境、公司内网等）里，这类应用的 DNS 查询会全部失败，
+表现为「容器内应用无法连接外网」。
+
+本补丁改为：
+
+1. 优先透传真实系统 DNS（method.invoke 真实 IConnectivityManager）；
+2. 失败时从真实活动网络的 LinkProperties 读取 DNS 作为兜底；
+3. 仍然失败才返回空列表——绝不硬编码 Google DNS。
+
+容器与宿主共享网络栈，宿主的 DNS 配置才是当前网络真正可用的解析服务器。
+diff --git a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IConnectivityManagerProxy.java b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IConnectivityManagerProxy.java
+index 1a0c97f..b2732a2 100644
+--- a/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IConnectivityManagerProxy.java
++++ b/Bcore/src/main/java/top/niunaijun/blackbox/fake/service/IConnectivityManagerProxy.java
+@@ -489,17 +489,34 @@ public class IConnectivityManagerProxy extends BinderInvocationStub {
+     public static class GetDnsServers extends MethodHook {
+         @Override
+         protected Object hook(Object who, Method method, Object[] args) throws Throwable {
++            // Dooble: 优先透传真实系统 DNS。上游无条件返回 8.8.8.8/8.8.4.4，
++            // 在 Google DNS 不可达的网络（如国内运营商环境）里会让调用方 DNS 解析失败。
+             try {
+-                
+-                java.util.List<java.net.InetAddress> dnsServers = new java.util.ArrayList<>();
+-                dnsServers.add(java.net.InetAddress.getByName("8.8.8.8"));
+-                dnsServers.add(java.net.InetAddress.getByName("8.8.4.4"));
+-                Slog.d(TAG, "Returning system DNS servers for sandboxed app");
+-                return dnsServers;
+-            } catch (Exception e) {
+-                Slog.w(TAG, "Error creating DNS servers list: " + e.getMessage());
+-                return method.invoke(who, args);
++                Object result = method.invoke(who, args);
++                if (result instanceof java.util.List && !((java.util.List<?>) result).isEmpty()) {
++                    return result;
++                }
++            } catch (Throwable t) {
++                Slog.w(TAG, "getDnsServers via system failed: " + t);
++            }
++            // 兜底：从真实活动网络的 LinkProperties 读取 DNS，而不是硬编码 Google DNS。
++            try {
++                Method getActiveNetwork = who.getClass().getMethod("getActiveNetwork");
++                Object active = getActiveNetwork.invoke(who);
++                if (active != null) {
++                    Method getLinkProps = who.getClass().getMethod("getLinkProperties", android.net.Network.class);
++                    Object lp = getLinkProps.invoke(who, active);
++                    if (lp != null) {
++                        Object dns = lp.getClass().getMethod("getDnsServers").invoke(lp);
++                        if (dns instanceof java.util.List && !((java.util.List<?>) dns).isEmpty()) {
++                            return dns;
++                        }
++                    }
++                }
++            } catch (Throwable t) {
++                Slog.w(TAG, "getDnsServers via LinkProperties failed: " + t);
+             }
++            return new java.util.ArrayList<java.net.InetAddress>();
+         }
+     }
+ 

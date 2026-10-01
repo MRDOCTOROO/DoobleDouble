@@ -271,6 +271,23 @@ Bcore 上游有 88 个 `fake/service` 代理，**没有 `IPackageInstaller` 代�
 | **`commit` 必须异步** | 它在虚拟应用主线程上被调用，同步装完会卡死 |
 | **结果通过 `IntentSender` 回传** | 与系统 `PackageInstallerService` 的做法一致，调用方的广播接收器靠这些 extra 判断成败 |
 
+#### 会话回调：商店安装队列的状态机驱动点
+
+Aurora 等商店除了收 `IntentSender` 广播，还用
+`PackageInstaller.registerSessionCallback()` 驱动 UI 状态机：会话创建/完成时，
+框架的 `SessionCallbackDelegate` 会回调 `onSessionCreated(int)` /
+`onSessionFinished(int, boolean)`，商店据此把「正在安装中」推进到「已安装/失败」。
+
+容器没有系统会话服务，回调永远不会由系统触发。补丁 `0014-session-callback-status.patch`
+让 `PackageInstallerProxy` 自己补上这条链路：
+
+- `registerSessionCallback` 捕获 `IPackageInstallerCallback` binder（`Set` 去重）；
+- 新增 `GetSessionInfo` 钩子，反射构造真实的 `SessionInfo`（`onSessionCreated`
+  后框架会立刻反查 `getSessionInfo(id)`）；
+- `createSession` 在 `SESSIONS.put` 之后触发 `onSessionCreated`；
+- `commit` 完成（含失败早退）在 `sendStatus` 之后触发 `onSessionFinished`——
+  广播先到、回调后到，商店先刷新列表再推进队列，两个通道互不替代。
+
 挂载点选得很取巧——不需要动系统服务表：
 
 ```java
@@ -305,6 +322,7 @@ Bcore 的 `src/main/aidl/android/content/pm/` 下有上游留下的一份
 | 文件 | 职责 |
 |---|---|
 | `tools/bcore-patch/0002-container-package-installer.patch` | 补丁本体（4 个文件） |
+| `tools/bcore-patch/0014-session-callback-status.patch` | 补全 `registerSessionCallback` / `getSessionInfo` / `onSessionFinished` 会话回调，驱动商店安装队列前进 |
 | `Bcore/.../fake/service/PackageInstallerProxy.java` | `IPackageInstaller` 代理 + 会话状态机 + `IPackageInstallerSession` 动态代理 |
 | `Bcore/.../app/configuration/ClientConfiguration.java` | 新增 `onInstallResult` 回调 |
 | `engine/src/bcore/.../ContainerInstallRelay.kt` | `onSessionResult()` 把结果落进同一份事件日志 |
